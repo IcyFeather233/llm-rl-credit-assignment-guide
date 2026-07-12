@@ -15,9 +15,12 @@
 | Framework | Link | OSS | Notes |
 |-----------|------|-----|-------|
 | veRL | https://github.com/volcengine/verl | ✅ | Common LLM RL backbone |
-| verl-agent | https://github.com/langfengQ/verl-agent | ✅ | GiGPO / HGPO recipes |
+| verl-agent | https://github.com/langfengQ/verl-agent | ✅ | GiGPO + [HGPO](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo) + [GraphGPO](https://github.com/langfengQ/verl-agent/tree/master/recipe/GraphGPO) |
 | ProxMO-RL | https://github.com/FlyTune/ProxMO-RL | ✅ | Plug-in CA; ALFWorld/WebShop scripts |
 | HiPER-agent | https://github.com/JonP07/HiPER-agent | ✅ | Hierarchical CA |
+| SWEET-RL | https://github.com/facebookresearch/sweet_rl | ✅ | Meta turn-level critic + ColBench |
+| ArCHer | https://github.com/YifeiZhou02/ArCHer | ✅ | Hierarchical multi-turn (ICML 2024) |
+| PRIME | https://github.com/PRIME-RL/PRIME | ✅ | Implicit process reward |
 | VinePPO | https://github.com/McGill-NLP/VinePPO | ✅ | Reasoning MC credit |
 | PURE | https://github.com/CJReinforce/PURE | ✅ | PRM + min-form |
 | CAPO | https://github.com/andyclsr/CAPO | ✅ | GenPRM |
