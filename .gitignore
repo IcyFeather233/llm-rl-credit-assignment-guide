@@ -1,0 +1,13 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets / local
+.env
+*.pem
+*token*
+
+# Python
+__pycache__/
+.venv/
