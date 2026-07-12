@@ -21,7 +21,7 @@ Prefer PRs that:
 - Newest first within a section  
 - Categories: Training / Evaluation / Analysis  
 - Do **not** put obscure one-off papers at the top of the README  
-- No personal paths, private plans, or credentials  
+- No personal filesystem paths or credentials  
 - Mark uncertain orgs as `—`
 
 ## Relationship to the taxonomy Awesome list
