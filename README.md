@@ -1,129 +1,134 @@
-# LLM RL Credit Assignment — Field Guide
+# LLM RL Credit Assignment Guide
 
 [![Awesome](https://awesome.re/badge.svg)](https://awesome.re)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-A **practical field guide** to credit assignment (CA) in reinforcement learning for large language models: what major labs ship, what is reproducible, which benchmarks/models people actually use, and where the code/data live.
+A curated, **self-contained** guide to **credit assignment (CA) in reinforcement learning for LLMs** (2024–2026).
 
-> **Not a taxonomy dump.** For the exhaustive granularity × methodology living list and survey companion, see  
-> **[xxzcc/Awesome-Credit-Assignment-in-LLM-RL](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL)** ([survey arXiv:2604.09459](https://arxiv.org/abs/2604.09459)).  
-> This repo is complementary: **reproducibility-first**, **org-first**, **date-desc**, with explicit **Paper / Code / Data / OSS** columns.
+This repository aims to cover the field end-to-end:
 
----
+1. **Taxonomy coverage** — granularity × methodology (reasoning & agentic)  
+2. **Reproducibility** — Paper · Code · Data · OSS on every practical entry  
+3. **Navigation** — Training / Evaluation / Analysis, date-descending, major labs featured first  
 
-## How this differs from the Awesome taxonomy list
+Survey reference: [From Reasoning to Agentic: CA in RL for LLMs](https://arxiv.org/abs/2604.09459) (arXiv:2604.09459).
 
-| | [Awesome-CA (xxzcc)](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL) | **This field guide** |
-|--|--|--|
-| Goal | Complete method catalog + survey taxonomy | Reproduce / compare / ship experiments |
-| Primary axis | Granularity × methodology | **Training / Evaluation / Analysis** |
-| Ordering | Taxonomy sections + recent additions | **Date descending**; **major orgs first on the homepage** |
-| Entry fields | Paper + short relevance note | **Paper · Code · Data · OSS · Model · Bench · Org** |
-| Coverage | Broad (47+ methods, near-core, adjacent) | Curated core + pointers; long-tail in Further reading |
-| Extra | Taxonomy figures | Default stacks, model tracks, “what to run first” |
+**Legend:** `✅` open code/weights · `◐` partial · `❌` not found · `—` N/A
 
 ---
 
 ## Contents
 
-- [Featured: major labs & venues](#featured-major-labs--venues)
-- [Training methods](#training-methods) → [`papers/training.md`](papers/training.md)
-- [Evaluation & benchmarks](#evaluation--benchmarks) → [`papers/evaluation.md`](papers/evaluation.md)
+- [Featured (major labs)](#featured-major-labs)
+- [Taxonomy map](#taxonomy-map) → [`papers/taxonomy.md`](papers/taxonomy.md)
+- [Training](#training) → [`papers/training.md`](papers/training.md)
+- [Evaluation](#evaluation) → [`papers/evaluation.md`](papers/evaluation.md)
 - [Analysis & surveys](#analysis--surveys) → [`papers/analysis.md`](papers/analysis.md)
-- [Default stacks (2026)](#default-stacks-2026)
-- [Further reading](#further-reading)
+- [Default stacks](#default-stacks-2026)
+- [Full catalog](#full-catalog) → [`papers/catalog.md`](papers/catalog.md)
 - [Contributing](CONTRIBUTING.md)
 
-**Legend:** `✅` open code or weights · `◐` partial / unofficial · `❌` not found / closed · `—` not applicable
+---
+
+## Featured (major labs)
+
+| Date | Work | Org | Code | Data / env | OSS |
+|------|------|-----|------|------------|-----|
+| 2026-06 | [GLM-5.2](https://huggingface.co/blog/zai-org/glm-52-blog) | **Zhipu AI** | [HF](https://huggingface.co/zai-org) | long-horizon coding agents | ✅ weights |
+| 2026-05 | [DelTA](https://arxiv.org/abs/2605.21467) | **RUC** | [RUCBM/DelTA](https://github.com/RUCBM/DelTA) | math RLVR | ✅ |
+| 2026-05 | [GraphGPO](https://arxiv.org/abs/2605.26684) | **NTU** | verl-agent ecosystem | agentic rollouts | ◐ |
+| 2026-02 | [HGPO](https://arxiv.org/abs/2602.22817) | **NTU** | [hgpo recipe](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo) | [ALFWorld](https://github.com/alfworld/alfworld) · [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
+| 2026-02 | [HiPER](https://arxiv.org/abs/2602.16165) | **Northwestern / UMN / Cisco** | [HiPER-agent](https://github.com/JonP07/HiPER-agent) | ALFWorld · WebShop | ✅ |
+| 2026-02 | [HCAPO](https://arxiv.org/abs/2603.08754) | **NJU** | partial | ALFWorld · WebShop | ◐ |
+| 2025-05 | [GiGPO](https://arxiv.org/abs/2505.10978) | **NTU / Skywork** | verl-agent | ALFWorld · WebShop | ✅/◐ |
+| 2025-04 | [Who&When](https://arxiv.org/abs/2505.00212) | **Microsoft** et al. | [code](https://github.com/ag2ai/Agents_Failure_Attribution) | [HF data](https://huggingface.co/datasets/Kevin355/Who_and_When) | ✅ |
+| 2025-01 | [DeepSeek-R1](https://arxiv.org/abs/2501.12948) | **DeepSeek** | reports / models | outcome RL | ✅/◐ |
+| 2024-10 | [VinePPO](https://arxiv.org/abs/2410.01679) | **McGill** | [VinePPO](https://github.com/McGill-NLP/VinePPO) | MATH · GSM8K | ✅ |
+| 2024-02 | [GRPO / DeepSeekMath](https://arxiv.org/abs/2402.03300) | **DeepSeek** | report | MATH-style | ✅ |
+
+Infra: [veRL](https://github.com/volcengine/verl) · [verl-agent](https://github.com/langfengQ/verl-agent) · [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)
 
 ---
 
-## Featured: major labs & venues
+## Taxonomy map
 
-Homepage highlights only **well-known orgs / strong venues**. Full tables (with code & data links) live under `papers/`.
+Two regimes × two axes (aligned with the 2026 survey):
 
-| Date | Work | Org | Type | Code | Data / env | OSS |
-|------|------|-----|------|------|------------|-----|
-| 2026-06 | [GLM-5.2](https://huggingface.co/blog/zai-org/glm-52-blog) | **Zhipu AI** | Analysis / industrial | [HF weights](https://huggingface.co/zai-org) | long-horizon coding agents | ✅ weights (MIT) |
-| 2026-05 | [DelTA](https://arxiv.org/abs/2605.21467) | **RUC** | Training (RLVR token CA) | [RUCBM/DelTA](https://github.com/RUCBM/DelTA) | math RLVR online | ✅ |
-| 2026-05 | [GraphGPO](https://arxiv.org/abs/2605.26684) | **NTU** | Training (agentic) | watch verl-agent ecosystem | agentic rollouts | ◐ |
-| 2026-02 | [HGPO](https://arxiv.org/abs/2602.22817) | **NTU** | Training (agentic) | [verl-agent/hgpo](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo) | [ALFWorld](https://github.com/alfworld/alfworld) · [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
-| 2026-02 | [HiPER](https://arxiv.org/abs/2602.16165) (ICML 2026) | **Northwestern / UMN / Cisco** | Training (hierarchical) | [JonP07/HiPER-agent](https://github.com/JonP07/HiPER-agent) | ALFWorld · WebShop | ✅ |
-| 2026-02 | [HCAPO](https://arxiv.org/abs/2603.08754) | **NJU** | Training (hindsight) | partial scripts | ALFWorld · WebShop · search QA | ◐ |
-| 2025-05 | [GiGPO](https://arxiv.org/abs/2505.10978) (NeurIPS 2025) | **NTU / Skywork** | Training (strong baseline) | verl-agent ecosystem | ALFWorld · WebShop · search QA | ✅/◐ |
-| 2025-04 | [Who&When](https://arxiv.org/abs/2505.00212) (ICML 2025) | **Microsoft** et al. | Evaluation | [Agents_Failure_Attribution](https://github.com/ag2ai/Agents_Failure_Attribution) | [Who_and_When](https://huggingface.co/datasets/Kevin355/Who_and_When) | ✅ |
-| 2025-01 | [DeepSeek-R1](https://arxiv.org/abs/2501.12948) | **DeepSeek** | Training / industrial | model cards / reports | outcome RL at scale | ✅/◐ |
-| 2024-10 | [VinePPO](https://arxiv.org/abs/2410.01679) (ICML 2025) | **McGill** | Training (reasoning) | [McGill-NLP/VinePPO](https://github.com/McGill-NLP/VinePPO) | MATH · GSM8K | ✅ |
-| 2024-02 | [DeepSeekMath / GRPO](https://arxiv.org/abs/2402.03300) | **DeepSeek** | Training (foundation) | reports | MATH-style verifiable | ✅ reports |
+| Regime | Granularity | Typical methods (examples) |
+|--------|-------------|----------------------------|
+| **Reasoning RL** | Token / Segment / Step | VinePPO, SPO, PURE, CAPO, DelTA, GRPO-λ |
+| **Agentic RL** | Step / Turn / Hierarchy / Multi-agent | GiGPO, HGPO, HiPER, HCAPO, TRIAGE, C3, SWEET-RL |
 
-Also foundational for practitioners: **veRL** ([volcengine/verl](https://github.com/volcengine/verl)), **verl-agent**, OpenRLHF.
+| Methodology | Examples |
+|-------------|---------|
+| Monte Carlo / group | GRPO, VinePPO, GiGPO, SPO |
+| TD / critic / GAE | PPO, AgentPRM, GLM-5.2 critic PPO |
+| LLM-as-critic / GenPRM | CAPO, HCAPO, TRIAGE judge |
+| Hindsight / counterfactual | HCAPO, C3, CRAFT, GraphGPO |
+| Process / verifiable | PURE, PRM800K, VPR |
+| Hierarchical | HiPER, ArCHer, HICRA |
+| Info-theoretic / entropy | AEM, T²PO, PAPO |
 
----
-
-## Training methods
-
-Curated training/method papers with **Paper · Code · Data · OSS · Model · Bench · Org**, newest first:  
-→ **[`papers/training.md`](papers/training.md)**
-
-Major themes in 2025–2026:
-
-1. **Critic-free group RL** (GRPO → GiGPO / HGPO) for agents  
-2. **Hierarchical / hindsight / soft baselines** (HiPER, HCAPO, ProxMO)  
-3. **Role / process / token reweighting** (TRIAGE, DelTA, PRM lines)  
-4. **Industrial long-horizon** (GLM-5.2 critic PPO + compaction)
+Full indexed tables (with Code/Data/OSS): **[`papers/taxonomy.md`](papers/taxonomy.md)**
 
 ---
 
-## Evaluation & benchmarks
+## Training
 
-→ **[`papers/evaluation.md`](papers/evaluation.md)** · **[`resources/benchmarks.md`](resources/benchmarks.md)**
+→ [`papers/training.md`](papers/training.md) (date-desc, with Code/Data/OSS)
 
-| Priority | Resource | Link | Notes |
-|----------|----------|------|-------|
-| P0 | ALFWorld | https://github.com/alfworld/alfworld | Default agentic CA env |
-| P0 | WebShop | https://github.com/princeton-nlp/WebShop | Paired with ALFWorld in most papers |
-| P1 | Who&When | https://huggingface.co/datasets/Kevin355/Who_and_When | Failure attribution |
-| P1 | QVal | https://arxiv.org/abs/2606.32034 | Dense-signal diagnostics |
-| P2 | MATH / GSM8K / PRM800K | HF / OpenAI | Reasoning CA |
+Themes: critic-free group RL → hierarchical/hindsight → role/token reweight → industrial long-horizon critic PPO.
+
+---
+
+## Evaluation
+
+→ [`papers/evaluation.md`](papers/evaluation.md) · [`resources/benchmarks.md`](resources/benchmarks.md)
+
+| Priority | Resource | Link |
+|----------|----------|------|
+| P0 | ALFWorld | https://github.com/alfworld/alfworld |
+| P0 | WebShop | https://github.com/princeton-nlp/WebShop |
+| P1 | Who&When | https://huggingface.co/datasets/Kevin355/Who_and_When |
+| P1 | QVal | https://arxiv.org/abs/2606.32034 |
+| P2 | MATH / GSM8K / PRM800K | HF / https://github.com/openai/prm800k |
 
 ---
 
 ## Analysis & surveys
 
-→ **[`papers/analysis.md`](papers/analysis.md)**
+→ [`papers/analysis.md`](papers/analysis.md)
 
-| Date | Work | Org | Code / list | OSS |
-|------|------|-----|-------------|-----|
-| 2026-06 | GLM-5.2 blog | Zhipu AI | [blog](https://huggingface.co/blog/zai-org/glm-52-blog) · [weights](https://huggingface.co/zai-org) | ✅ weights |
-| 2026-04 | Reasoning→Agentic CA survey | — | [arXiv](https://arxiv.org/abs/2604.09459) · [Awesome list](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL) | ✅ list |
+| Date | Work | Org | Links | OSS |
+|------|------|-----|-------|-----|
+| 2026-06 | GLM-5.2 | Zhipu | [blog](https://huggingface.co/blog/zai-org/glm-52-blog) | ✅ weights |
+| 2026-04 | Reasoning→Agentic CA survey | — | [arXiv:2604.09459](https://arxiv.org/abs/2604.09459) | ✅ paper |
 
 ---
 
 ## Default stacks (2026)
 
-| Piece | Common choice | Why |
-|-------|---------------|-----|
-| Agentic benches | ALFWorld + WebShop | Shared by NTU line & follow-ups |
-| Comparable policy | Qwen2.5-Instruct 1.5B / 7B | Matches GiGPO→HGPO tables |
-| Newer policy track | Qwen3-Instruct (e.g. 1.7B) + Qwen3-8B-thinking judge | Used in TRIAGE (2026-06) |
-| Trainer | veRL / verl-agent / ProxMO-RL | Open recipes |
-| Strong baseline | GRPO + **GiGPO** | What reviewers expect |
-| Train data shape | Online env rollouts + verifier | Rare dedicated “CA datasets” |
+| Piece | Common choice |
+|-------|---------------|
+| Agentic benches | ALFWorld + WebShop |
+| Comparable policy | Qwen2.5-Instruct 1.5B / 7B |
+| Newer policy | Qwen3-Instruct (e.g. 1.7B) + Qwen3-8B-thinking judge |
+| Trainer | veRL / verl-agent / ProxMO-RL |
+| Baselines | GRPO + GiGPO |
+| Data shape | Online rollouts + verifier (rarely a dedicated CA dataset) |
 
-Details: [`resources/stacks.md`](resources/stacks.md) · [`resources/models.md`](resources/models.md)
+→ [`resources/stacks.md`](resources/stacks.md) · [`resources/models.md`](resources/models.md)
 
 ---
 
-## Further reading
+## Full catalog
 
-Long-tail / smaller-team / near-core papers (still useful, not homepage-front):  
-→ [`papers/further_reading.md`](papers/further_reading.md)
-
-For exhaustive taxonomy coverage, prefer the [xxzcc Awesome list](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL).
+Complete date-sorted catalog across training / evaluation / analysis / long-tail:  
+→ **[`papers/catalog.md`](papers/catalog.md)**
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Prefer PRs that add **working Code / Data / OSS** fields for major-org or highly cited works.
+See [CONTRIBUTING.md](CONTRIBUTING.md). New entries should include **Paper + Code + Data + OSS** whenever possible.
