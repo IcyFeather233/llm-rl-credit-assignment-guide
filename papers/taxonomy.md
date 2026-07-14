@@ -12,6 +12,7 @@ Homepage features major labs; this file indexes the broader method space with **
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [VinePPO](https://arxiv.org/abs/2410.01679) (ICML 2025) | MC vine | [McGill-NLP/VinePPO](https://github.com/McGill-NLP/VinePPO) | MATH, GSM8K | ✅ |
+| [VAPO](https://arxiv.org/abs/2504.05118) | Value-model PPO + length-adaptive GAE | — | AIME 2024 | ❌ |
 | [TACO](https://arxiv.org/abs/2607.07976) | Tail-risk positive-credit calibration | [xiuyilou/TACO](https://github.com/xiuyilou/TACO) | math/coding RLVR | ✅ |
 | [DelTA](https://arxiv.org/abs/2605.21467) | Discriminative token | [RUCBM/DelTA](https://github.com/RUCBM/DelTA) | RLVR math | ✅ |
 | [GRPO-λ](https://arxiv.org/abs/2510.00194) | λ-return / eligibility | — | math RLVR | ❌/◐ |
@@ -86,7 +87,7 @@ Homepage features major labs; this file indexes the broader method space with **
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [TRIAGE](https://arxiv.org/abs/2606.32017) | Role-typed segment | — | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ◐ |
-| [SAO](https://arxiv.org/abs/2607.07508) | Single-rollout async critic/GAE + DIS clipping | — | SWE-bench Verified, BeyondAIME, IMOAnswerBench | ◐ |
+| [SAO](https://arxiv.org/abs/2607.07508) | Single-rollout async critic/GAE + DIS clipping; uses VAPO-style length-adaptive GAE | — | SWE-bench Verified, BeyondAIME, IMOAnswerBench | ◐ |
 | [SPA-RL](https://arxiv.org/abs/2505.20732) | Learned additive progress redistribution | [SPA-RL-Agent](https://github.com/WangHanLinHenry/SPA-RL-Agent) | ALFWorld, WebShop, VirtualHome | ✅ |
 | [SWE-TRACE](https://arxiv.org/abs/2604.14820) | Rubric PRM + memory-augmented RL | — | SWE-bench Verified | ◐ |
 | [VPR](https://arxiv.org/abs/2605.10325) | Verifiable process rewards | — | agentic | ❌/◐ |
