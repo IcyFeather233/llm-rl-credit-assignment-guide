@@ -12,6 +12,7 @@ Homepage features major labs; this file indexes the broader method space with **
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [VinePPO](https://arxiv.org/abs/2410.01679) (ICML 2025) | MC vine | [McGill-NLP/VinePPO](https://github.com/McGill-NLP/VinePPO) | MATH, GSM8K | ✅ |
+| [TACO](https://arxiv.org/abs/2607.07976) | Tail-risk positive-credit calibration | [xiuyilou/TACO](https://github.com/xiuyilou/TACO) | math/coding RLVR | ✅ |
 | [DelTA](https://arxiv.org/abs/2605.21467) | Discriminative token | [RUCBM/DelTA](https://github.com/RUCBM/DelTA) | RLVR math | ✅ |
 | [GRPO-λ](https://arxiv.org/abs/2510.00194) | λ-return / eligibility | — | math RLVR | ❌/◐ |
 | [GRAIL](https://arxiv.org/abs/2606.04889) | Gradient-reweighted adv | — | RLVR | ❌/◐ |
@@ -54,6 +55,9 @@ Homepage features major labs; this file indexes the broader method space with **
 | [GiGPO](https://arxiv.org/abs/2505.10978) | Group-in-group | [verl-agent](https://github.com/langfengQ/verl-agent) | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
 | [HGPO](https://arxiv.org/abs/2602.22817) | Hierarchy-of-groups | [recipe/hgpo](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo) | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
 | [GraphGPO](https://arxiv.org/abs/2605.26684) | Graph step credit | [recipe/GraphGPO](https://github.com/langfengQ/verl-agent/tree/master/recipe/GraphGPO) | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
+| [G2PO](https://arxiv.org/abs/2606.22995) | Global graph edge TD | [Nala-YN/G2PO](https://github.com/Nala-YN/G2PO) | ALFWorld, WebShop, AppWorld | ✅ |
+| [ProGPO](https://arxiv.org/abs/2607.04242) | Exact-prefix peers + state potentials | — | ALFWorld, WebShop | ◐ |
+| [CARL](https://arxiv.org/abs/2512.04949) | Entropy-selected tree-edge advantage | announced | search QA | ❌/◐ |
 | [ProxMO](https://arxiv.org/abs/2602.19225) | Soft proximity baseline | [ProxMO-RL](https://github.com/FlyTune/ProxMO-RL) | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
 | [GRPO](https://arxiv.org/abs/2402.03300) | Trajectory group | [PDF](https://arxiv.org/pdf/2402.03300) | verifiable tasks | ✅ reports |
 
@@ -70,16 +74,21 @@ Homepage features major labs; this file indexes the broader method space with **
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [HCAPO](https://arxiv.org/abs/2603.08754) | Hindsight critic | — | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ◐ |
+| [PBSD](https://arxiv.org/abs/2606.09348) | Privileged Bayesian turn evidence | — | BrowseComp/search agents | ◐ |
+| [PivoARL](https://arxiv.org/abs/2607.03702) | Pivotal-error local retry | [yuki-younai/PivoARL](https://github.com/yuki-younai/PivoARL) | agent tasks + search QA | ✅ |
 | [C3](https://github.com/EIT-EAST-Lab/C3) | Multi-agent counterfactual | [EIT-EAST-Lab/C3](https://github.com/EIT-EAST-Lab/C3) | collab tasks | ✅ |
 | CCPO (2026) | Counterfactual PO | — | multi-agent | ❌/◐ |
 | [CRAFT](https://arxiv.org/abs/2606.29476) | Sibling counterfactual | — | agentic | ❌/◐ |
-| CriticSearch (2025) | Retrospective critic | — | search agents | ❌/◐ |
+| [CriticSearch](https://arxiv.org/abs/2511.12159) | Privileged retrospective critic | — | search agents | ❌/◐ |
 
 ### Turn-level process / MDP
 
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [TRIAGE](https://arxiv.org/abs/2606.32017) | Role-typed segment | — | [ALFWorld](https://github.com/alfworld/alfworld), [WebShop](https://github.com/princeton-nlp/WebShop) | ◐ |
+| [SAO](https://arxiv.org/abs/2607.07508) | Single-rollout async critic/GAE + DIS clipping | — | SWE-bench Verified, BeyondAIME, IMOAnswerBench | ◐ |
+| [SPA-RL](https://arxiv.org/abs/2505.20732) | Learned additive progress redistribution | [SPA-RL-Agent](https://github.com/WangHanLinHenry/SPA-RL-Agent) | ALFWorld, WebShop, VirtualHome | ✅ |
+| [SWE-TRACE](https://arxiv.org/abs/2604.14820) | Rubric PRM + memory-augmented RL | — | SWE-bench Verified | ◐ |
 | [VPR](https://arxiv.org/abs/2605.10325) | Verifiable process rewards | — | agentic | ❌/◐ |
 | [AgentPRM](https://arxiv.org/abs/2511.08325) | TD+GAE turn PRM | — | agents | ◐ |
 | [SWEET-RL](https://arxiv.org/abs/2503.15478) | Privileged critic | [sweet_rl](https://github.com/facebookresearch/sweet_rl) | [ColBench](https://github.com/facebookresearch/sweet_rl) | ✅ |
@@ -91,6 +100,8 @@ Homepage features major labs; this file indexes the broader method space with **
 
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
+| [DeltaBelief-RL](https://arxiv.org/abs/2602.12342) | Target-belief shift intrinsic reward | [delta-belief-rl](https://github.com/bethgelab/delta-belief-rl) | synthetic interaction + OOD | ✅ |
+| [IGRPO](https://arxiv.org/abs/2607.06223) | Information-gain-directed tree rollout | [e3trange/IGRPO](https://github.com/e3trange/IGRPO) | search QA | ✅ |
 | AEM / T²PO / PAPO (2026) | Entropy / uncertainty | — | multi-turn | ❌/◐ |
 | APPO / OPID / Progress Advantage (2026) | Procedure / skill / progress | — | agentic | ❌/◐ |
 
@@ -101,11 +112,22 @@ Homepage features major labs; this file indexes the broader method space with **
 | C3 | Counterfactual multi-agent | [C3](https://github.com/EIT-EAST-Lab/C3) | LLM collab | ✅ |
 | CCPO / related MAS CA | Structural / Shapley-style | — | multi-agent | ❌/◐ |
 
+### Memory / provenance / context
+
+| Paper | Method tag | Code | Data | OSS |
+|-------|------------|------|------|-----|
+| [ECHO](https://arxiv.org/abs/2606.31650) | Source-indexed evidence routing | [xiezijun714-lang/Echo](https://github.com/xiezijun714-lang/Echo) | BrowseComp-Plus | ✅ |
+| [Memory-R2](https://arxiv.org/abs/2605.21768) | Global + shared-memory-state local rerollout | [ahmedehabb/Memory-R2](https://github.com/ahmedehabb/Memory-R2) | LoCoMo, LongMemEval | ✅ |
+| [CompactionRL](https://arxiv.org/abs/2607.05378) | Joint execution/summary RL + cross-trajectory GAE | — | SWE-bench Verified, Terminal-Bench 2.0 | ◐ |
+| [Proactive Memory Agent](https://arxiv.org/abs/2607.08716) | Learned reminder / silence intervention | [proactive-memory-agent](https://github.com/yifannnwu/proactive-memory-agent) | Terminal-Bench 2.0, tau2-bench | ✅ |
+
 ### Industrial long-horizon
 
 | Paper | Method tag | Code | Data | OSS |
 |-------|------------|------|------|-----|
 | [GLM-5.2](https://huggingface.co/blog/zai-org/glm-52-blog) | Critic PPO + compaction | [HF weights](https://huggingface.co/zai-org) | SWE/Terminal-style | ✅ weights |
+| [SAO](https://arxiv.org/abs/2607.07508) | Asynchronous single-rollout RL deployed in GLM-5.2 training | — | SWE-bench Verified, BeyondAIME, IMOAnswerBench | ◐ |
+| [STRACE](https://arxiv.org/abs/2607.07702) *(analysis, not policy CA)* | Dependency graph + backward causal slice | [moomight/STRACE](https://github.com/moomight/STRACE) | VeruSAGE-Bench | ✅ |
 
 ---
 
