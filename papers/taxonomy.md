@@ -131,6 +131,12 @@ Homepage features major labs; this file indexes the broader method space with **
 
 ---
 
+## External awesome-list gap fill
+
+Additional source-listed papers from [xxzcc/Awesome-Credit-Assignment-in-LLM-RL](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL) that were missing or only partially covered are tracked in [`awesome_gap_fill.md`](awesome_gap_fill.md). That file keeps foundational/background items separate from core training methods.
+
+---
+
 ## Quick legend for missing code
 
 Many 2026 preprints list methods without a public trainer yet. Marked `❌/◐` until a reproducible repo appears—PRs welcome to upgrade badges.

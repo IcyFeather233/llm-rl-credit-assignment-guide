@@ -22,6 +22,7 @@ Survey: [arXiv:2604.09459](https://arxiv.org/abs/2604.09459).
 - [Long-horizon frontier (2026-06/07)](#long-horizon-frontier-2026-0607)
 - [Featured (major labs)](#featured-major-labs)
 - [Recently added / gap-fill](#recently-added--gap-fill)
+- [Awesome cross-check](#awesome-cross-check) → [`papers/awesome_gap_fill.md`](papers/awesome_gap_fill.md)
 - [Taxonomy](#taxonomy-map) → [`papers/taxonomy.md`](papers/taxonomy.md)
 - [Training](#training) → [`papers/training.md`](papers/training.md)
 - [Evaluation](#evaluation) → [`papers/evaluation.md`](papers/evaluation.md)
@@ -168,6 +169,12 @@ Pulled from citation neighborhoods of GiGPO / VinePPO / survey / Meta–Berkeley
 
 ---
 
+## Awesome cross-check
+
+Compared against [xxzcc/Awesome-Credit-Assignment-in-LLM-RL](https://github.com/xxzcc/Awesome-Credit-Assignment-in-LLM-RL) on 2026-07-14. Missing or less-covered items are tracked in [`papers/awesome_gap_fill.md`](papers/awesome_gap_fill.md). Foundational/background papers are separated from training methods so the main tables stay focused on methods that change model training or credit routing.
+
+---
+
 ## Taxonomy map
 
 | Regime | Granularity | Examples |
@@ -189,6 +196,8 @@ Pulled from citation neighborhoods of GiGPO / VinePPO / survey / Meta–Berkeley
 → [`papers/taxonomy.md`](papers/taxonomy.md)
 
 ---
+
+The full training and catalog tables include `Org`, `Base model`, `Train data`, and `Eval data` columns for the main experiments.
 
 ## Training
 
