@@ -70,6 +70,18 @@ Homepage features major labs; this file indexes the broader method space with **
 | [ArCHer](https://arxiv.org/abs/2402.19446) (ICML 2024) | Hierarchical multi-turn | [YifeiZhou02/ArCHer](https://github.com/YifeiZhou02/ArCHer) | [envs in repo](https://github.com/YifeiZhou02/ArCHer) | ✅ |
 | [SWEET-RL](https://arxiv.org/abs/2503.15478) | Turn-level critic | [facebookresearch/sweet_rl](https://github.com/facebookresearch/sweet_rl) | [ColBench](https://github.com/facebookresearch/sweet_rl) | ✅ |
 
+### Offline/SFT trajectory credit
+
+| Paper | Method tag | Code | Data | OSS |
+|-------|------------|------|------|-----|
+| [ATLaS](https://arxiv.org/abs/2503.02197) | Critical-step SFT mask | — | expert agent trajectories | ❌/◐ |
+| [STeP](https://arxiv.org/abs/2505.20023) | Self-reflection + partial loss masking | — | ALFWorld, WebShop, SciWorld | ❌/◐ |
+| [EEF](https://arxiv.org/abs/2504.13145) | Beneficial segment mining from failed expert trajectories | — | WebShop, SciWorld | ❌/◐ |
+| [IPR / Watch Every Step](https://arxiv.org/abs/2406.11176) | MC step reward + contrastive action pairs | — | complex agent tasks | ❌/◐ |
+| [Q-SFT](https://arxiv.org/abs/2411.05193) | Q-learning as modified SFT | — | offline transition/reward datasets | ❌/◐ |
+| [Reward-Weighted FT](https://arxiv.org/abs/2506.06964) | Trajectory-reward weighted SFT | — | conversation trajectories | ❌/◐ |
+| [AWR](https://arxiv.org/abs/1910.00177) | Advantage-weighted behavior cloning foundation | — | off-policy/static RL datasets | ❌/◐ |
+
 ### Hindsight / counterfactual
 
 | Paper | Method tag | Code | Data | OSS |

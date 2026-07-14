@@ -20,6 +20,7 @@ Survey: [arXiv:2604.09459](https://arxiv.org/abs/2604.09459).
 
 - [How CA changes model training](#how-credit-assignment-changes-model-training)
 - [Long-horizon frontier (2026-06/07)](#long-horizon-frontier-2026-0607)
+- [SFT/offline trajectory credit](#sftoffline-trajectory-credit-assignment)
 - [Featured (major labs)](#featured-major-labs)
 - [Recently added / gap-fill](#recently-added--gap-fill)
 - [Awesome cross-check](#awesome-cross-check) → [`papers/awesome_gap_fill.md`](papers/awesome_gap_fill.md)
@@ -85,6 +86,20 @@ The important differences are therefore **where the credit signal comes from**, 
 | 2026-05 | GraphGPO | NTU | — | Agent rollout graphs | ALFWorld, WebShop | [📄](https://arxiv.org/abs/2605.26684) · [💻](https://github.com/langfengQ/verl-agent/tree/master/recipe/GraphGPO) · [📦 ALFWorld](https://github.com/alfworld/alfworld) · [📦 WebShop](https://github.com/princeton-nlp/WebShop) | ✅ | Step reward from shortest cost-to-go in a graph made by merging all observed state transitions | Builds a rollout graph, scores edges by distance reduction toward a successful state, normalizes outgoing edges per state, and mixes graph and episode advantages | Critic-free and reuses rollouts; needs mergeable states and sufficiently covered, mostly stable transition structure |
 | 2026-06 | TRIAGE | — | — | Agent rollouts segmented and role-labeled by judge | ALFWorld, WebShop | [📄](https://arxiv.org/abs/2606.32017) · 💻 — · [📦 ALFWorld](https://github.com/alfworld/alfworld) · [📦 WebShop](https://github.com/princeton-nlp/WebShop) | ◐ | An LLM judge labels each segment as decisive, exploratory, no-progress, or regressive; fixed role constants correct GRPO credit | Adds a bounded role reward to the episode advantage, whitens segment advantages, broadcasts them only to that action's tokens, then uses standard clipped GRPO | Interpretable and no judge at inference, but adds one judge call per segment and can degrade when role classification is unreliable |
 
+### SFT/offline trajectory credit assignment
+
+These methods start from expert, synthetic, failed, or offline trajectories and change which tokens/steps receive imitation loss. They are useful when the available signal is an SFT dataset rather than fresh RL rollouts.
+
+| Date | Method | Org | Base model | Train data | Eval data | Links | OSS | Credit signal / SFT target | How the model is trained | Extra requirements / main limitation |
+|------|--------|-----|------------|------------|-----------|-------|-----|----------------------------|--------------------------|--------------------------------------|
+| 2025-06 | Reward-Weighted Fine-Tuning | — | — | Offline conversation trajectories with scalar rewards | Short-horizon QA / conversation optimization | [📄](https://arxiv.org/abs/2506.06964) · 💻 — · 📦 — | ❌ | Trajectory reward weights the SFT loss for all actions in the trajectory | Solves offline RL as reward-weighted SFT | Useful baseline but not intra-trajectory CA: the same reward is broadcast to all actions |
+| 2025-05 | STeP | — | LLaMA2-7B-Chat student; Qwen1.5-110B-Chat teacher | Synthetic self-reflected trajectories with error, reflection, and correction steps | ALFWorld, WebShop, SciWorld | [📄](https://arxiv.org/abs/2505.20023) · 💻 — · 📦 — | ❌ | Partial mask over trajectory tokens: incorrect or suboptimal thought/action tokens stay in context but do not receive imitation loss | Fine-tunes on self-reflected trajectories while supervising only valid steps, reflections, and corrections | Depends on teacher-generated reflection quality and step labels; still mostly hard masking rather than causal value estimation |
+| 2025-04 | EEF | — | — | Successful plus failed expert trajectories; beneficial actions mined from failed traces | WebShop, SciWorld | [📄](https://arxiv.org/abs/2504.13145) · 💻 — · 📦 — | ❌ | Segment/action-level mining from failed expert trajectories; helpful plans/actions kept, harmful actions filtered out | Adds beneficial failure fragments back into agent fine-tuning data instead of rejecting whole failed trajectories | Data-centric SFT/RFT improvement; credit labels depend on the failure-analysis heuristic |
+| 2025-03 | ATLaS | — | — | Expert agent trajectories with LLM-selected critical steps | Multi-domain agent tasks | [📄](https://arxiv.org/abs/2503.02197) · 💻 — · 📦 — | ❌ | Binary step mask: planning, complex reasoning, key observations/actions, and self-correction steps receive loss; other steps are context only | Keeps full trajectory context but computes teacher-forcing loss only on selected critical steps; reports using about 30% of steps | Most direct pure-SFT step-level CA; quality depends on the critical-step selector |
+| 2024-11 | Q-SFT | UC Berkeley | Pretrained LLMs/VLMs | Static offline transition/reward datasets | Dialogue, robotic manipulation, visual navigation | [📄](https://arxiv.org/abs/2411.05193) · 💻 — · 📦 — | ❌ | Q-weighted token probabilities: Bellman-style targets make token likelihoods encode conservative Q-values | Recasts Q-learning as a modified SFT objective without a separate value head | More formal offline RL than ordinary SFT; requires transition/reward data rather than plain expert demonstrations |
+| 2024-06 | IPR / Watch Every Step | — | — | Expert trajectories plus MC rollouts from expert prefixes | Three complex agent tasks | [📄](https://arxiv.org/abs/2406.11176) · 💻 — · 📦 — | ❌ | Monte Carlo step-level reward estimates create contrastive action pairs between agent and expert actions | Iteratively rolls out from expert prefixes, estimates step rewards, and trains with outcome-, step-preference, and SFT-style signals | Not pure SFT: needs environment rollouts from intermediate prefixes |
+| 2019-10 | AWR | UC Berkeley | — | Off-policy replay / static RL datasets | OpenAI Gym and continuous-control tasks | [📄](https://arxiv.org/abs/1910.00177) · 💻 — · 📦 — | ❌ | Advantage-weighted behavior cloning target | Alternates value regression with weighted maximum-likelihood policy regression | Classical foundation for weighted SFT/offline RL, not an LLM-agent method |
+
 ### Long-horizon frontier (2026-06/07)
 
 These additions are the methods in the accompanying long-horizon survey that were missing or only listed by name in the repository. They extend the assignable unit beyond ordinary action tokens to graph edges, evidence turns, retry boundaries, memory operations, context summaries, and intervention decisions.
@@ -116,6 +131,7 @@ These additions are the methods in the accompanying long-horizon survey that wer
 
 - If intermediate prefixes can be reset cheaply, MC methods such as VinePPO and SPO provide direct value estimates at the price of extra rollouts.
 - If every intermediate decision is objectively checkable, VPR or SCRL gives the cleanest signal; PURE is useful when a trained PRM is available.
+- If the supervision source is an existing SFT/offline dataset rather than online rollouts, ATLaS/STeP/EEF are the direct step-mask or segment-mining tools; Q-SFT and AWR-style objectives move toward value-weighted imitation.
 - If rollout groups repeatedly visit comparable states, GiGPO, HGPO, ProxMO, and GraphGPO extract finer credit without training a critic. Their main difference is how they define a comparable state: exact state, state plus history, soft textual proximity, or graph connectivity.
 - If intermediate actions are not verifiable, the main options are learned critics (ArCHer, HiPER, AgentPRM), privileged or generative judges (SWEET-RL, CAPO, TRIAGE), and hindsight scoring (HCAPO). These replace verifier cost with model bias and additional inference.
 - For very long tasks with explicit subgoals, hierarchical credit (HiPER, ArCHer) is more structurally appropriate than assigning an independent score to every token or turn.
@@ -182,12 +198,14 @@ Compared against [xxzcc/Awesome-Credit-Assignment-in-LLM-RL](https://github.com/
 | Regime | Granularity | Examples |
 |--------|-------------|---------|
 | Reasoning RL | Token / Segment / Step | VinePPO, VAPO, SPO, PURE, CAPO, DelTA, PRIME |
+| SFT / offline trajectories | Step mask / segment mining / Q-weighted SFT | ATLaS, STeP, EEF, IPR, Q-SFT, Reward-Weighted FT |
 | Agentic RL | Step / Turn / Edge / Hierarchy / Memory | GiGPO, G2PO, PBSD, ECHO, Memory-R2, CompactionRL, HiPER, TRIAGE, SAO |
 
 | Methodology | Examples |
 |-------------|---------|
 | Monte Carlo / group | GRPO, VinePPO, GiGPO, SPO |
 | TD / critic / GAE | PPO, VAPO, AgentPRM, GLM-5.2 critic PPO, SAO, SWEET-RL |
+| Selective / masked / weighted SFT | ATLaS, STeP, EEF, IPR, Q-SFT, AWR |
 | LLM-as-critic / GenPRM | CAPO, HCAPO, TRIAGE |
 | Hindsight / counterfactual / graph | HCAPO, PBSD, CRAFT, PivoARL, GraphGPO, G2PO |
 | Process / verifiable / implicit PRM | PURE, PRIME, PRM800K, VPR |

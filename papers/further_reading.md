@@ -26,3 +26,17 @@ Checked against [SAO: Single-Rollout Asynchronous Optimization for Agentic Reinf
 | RLOO / Back to Basics | [2402.14740](https://arxiv.org/abs/2402.14740) | REINFORCE-style baseline contrasted with GRPO/PPO | Baseline optimizer; tracked here |
 
 SAO also cites Qwen3, GPT-OSS-120B, and GLM-4.5 as model/report dependencies; those are not added as credit-assignment methods.
+
+## SFT/offline trajectory credit assignment
+
+This route answers a different question from online RL credit assignment: given an existing SFT/offline dataset, which steps should receive imitation loss or larger weight?
+
+| Work | Link | Why it matters |
+|------|------|----------------|
+| ATLaS | [2503.02197](https://arxiv.org/abs/2503.02197) | Pure SFT hard mask over critical steps in expert trajectories |
+| STeP | [2505.20023](https://arxiv.org/abs/2505.20023) | Keeps erroneous steps as context but masks their labels |
+| EEF | [2504.13145](https://arxiv.org/abs/2504.13145) | Mines useful actions from failed expert trajectories |
+| IPR / Watch Every Step | [2406.11176](https://arxiv.org/abs/2406.11176) | Uses MC rollout from expert prefixes to estimate step-level process reward |
+| Q-SFT | [2411.05193](https://arxiv.org/abs/2411.05193) | Recasts offline Q-learning as an SFT-like language-model objective |
+| Reward-Weighted FT | [2506.06964](https://arxiv.org/abs/2506.06964) | Trajectory-level reward-weighted SFT baseline; useful but not intra-trajectory CA |
+| AWR | [1910.00177](https://arxiv.org/abs/1910.00177) | Classical advantage-weighted maximum-likelihood foundation for weighted SFT/offline RL |

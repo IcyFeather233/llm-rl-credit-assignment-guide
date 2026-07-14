@@ -40,12 +40,16 @@ Date-descending. Link style: **[📄 Paper] · [💻 Code] · [📦 Data]**. Exp
 | 2025-11 | CriticSearch | — | — | Search traces with gold-answer retrospective critic | Multi-hop QA / search benchmarks | [📄](https://arxiv.org/abs/2511.12159) · 💻 — · 📦 multi-hop QA | ❌ |
 | 2025-11 | AgentPRM | Fudan/Ant | — | Agent trajectories with TD/GAE PRM targets | Agent search/control tasks | [📄](https://arxiv.org/abs/2511.08325) · 💻 — · 📦 — | ◐ |
 | 2025-08 | CAPO | — | — | RLVR rollouts with GenPRM critiques | Math reasoning and OOD benchmarks | [📄](https://arxiv.org/abs/2508.02298) · [💻](https://github.com/andyclsr/CAPO) · 📦 — | ✅ |
+| 2025-06 | Reward-Weighted Fine-Tuning | — | — | Offline conversation trajectories with scalar rewards | Short-horizon QA / conversation optimization | [📄](https://arxiv.org/abs/2506.06964) · 💻 — · 📦 — | ❌ |
 | 2025-05 | SPO | — | — | Math CoT segment rollouts | Math reasoning benchmarks | [📄](https://arxiv.org/abs/2505.23564) · [💻](https://github.com/AIFrameResearch/SPO) · 📦 — | ✅ |
+| 2025-05 | STeP | — | LLaMA2-7B-Chat student; Qwen1.5-110B-Chat teacher | Synthetic self-reflected trajectories with partial masking | ALFWorld, WebShop, SciWorld | [📄](https://arxiv.org/abs/2505.20023) · 💻 — · 📦 — | ❌ |
 | 2025-05 | SPA-RL | — | — | Agent rollouts with learned progress attribution | ALFWorld, WebShop, VirtualHome | [📄](https://arxiv.org/abs/2505.20732) · [💻](https://github.com/WangHanLinHenry/SPA-RL-Agent) · [📦 ALFWorld](https://github.com/alfworld/alfworld) · [📦 WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
 | 2025-05 | GiGPO | NTU/Skywork | — | Agent rollouts with repeated anchor states | ALFWorld, WebShop | [📄](https://arxiv.org/abs/2505.10978) · [💻](https://github.com/langfengQ/verl-agent) · [📦 ALFWorld](https://github.com/alfworld/alfworld) · [📦 WebShop](https://github.com/princeton-nlp/WebShop) | ✅ |
+| 2025-04 | EEF | — | — | Successful and failed expert trajectories; beneficial actions mined from failures | WebShop, SciWorld | [📄](https://arxiv.org/abs/2504.13145) · 💻 — · 📦 — | ❌ |
 | 2025-04 | VAPO | ByteDance Seed | Qwen-32B | Long-CoT verifier-based reasoning RL rollouts; value pretraining from fixed-policy MC returns | AIME 2024 | [📄](https://arxiv.org/abs/2504.05118) · 💻 — · 📦 — | ❌ |
 | 2025-04 | PURE | — | — | PRM800K / process-reward supervision plus RLVR rollouts | Math reasoning benchmarks | [📄](https://arxiv.org/abs/2504.15275) · [💻](https://github.com/CJReinforce/PURE) · [📦 PRM800K](https://github.com/openai/prm800k) | ✅ |
 | 2025-03 | SWEET-RL | Meta/FAIR | — | ColBench interaction pairs with privileged labels | ColBench | [📄](https://arxiv.org/abs/2503.15478) · [💻](https://github.com/facebookresearch/sweet_rl) · [📦 ColBench](https://github.com/facebookresearch/sweet_rl) | ✅ |
+| 2025-03 | ATLaS | — | — | Expert agent trajectories with critical-step masks | Multi-domain agent tasks | [📄](https://arxiv.org/abs/2503.02197) · 💻 — · 📦 — | ❌ |
 | 2025-01 | DeepSeek-R1 | DeepSeek | DeepSeek-V3-Base | Cold-start SFT plus large-scale RL on reasoning data | Math, code, and reasoning benchmarks | [📄](https://arxiv.org/abs/2501.12948) · [💻](https://huggingface.co/deepseek-ai) · 📦 — | ✅ |
 | 2025-01 | PRIME | PRIME-RL | — | Outcome-labeled reasoning rollouts for implicit PRM/RL | Math reasoning benchmarks | [📄](https://arxiv.org/abs/2502.01456) · [💻](https://github.com/PRIME-RL/PRIME) · [📦](https://huggingface.co/PRIME-RL) | ✅ |
 
@@ -53,7 +57,9 @@ Date-descending. Link style: **[📄 Paper] · [💻 Code] · [📦 Data]**. Exp
 
 | Date | Work | Org | Base model | Train data | Eval data | Links | OSS |
 |------|------|-----|------------|------------|-----------|-------|-----|
+| 2024-11 | Q-SFT | UC Berkeley | Pretrained LLMs/VLMs | Static offline transition/reward datasets | Dialogue, robotic manipulation, visual navigation | [📄](https://arxiv.org/abs/2411.05193) · 💻 — · 📦 — | ❌ |
 | 2024-10 | VinePPO | McGill | — | Math reasoning continuations from intermediate prefixes | MATH, GSM8K | [📄](https://arxiv.org/abs/2410.01679) · [💻](https://github.com/McGill-NLP/VinePPO) · [📦](https://github.com/McGill-NLP/VinePPO) | ✅ |
+| 2024-06 | IPR / Watch Every Step | — | — | Expert trajectories plus MC rollouts from expert prefixes | Three complex agent tasks | [📄](https://arxiv.org/abs/2406.11176) · 💻 — · 📦 — | ❌ |
 | 2024-02 | ArCHer | Berkeley et al. | — | Replay-buffer agent trajectories | WebShop / ALFWorld-style agent environments | [📄](https://arxiv.org/abs/2402.19446) · [💻](https://github.com/YifeiZhou02/ArCHer) · [📦](https://github.com/YifeiZhou02/ArCHer) | ✅ |
 | 2024-02 | GRPO/DeepSeekMath | DeepSeek | DeepSeekMath-Base 7B | Math instruction/RL data | GSM8K, MATH, CMATH and related math benchmarks | [📄](https://arxiv.org/abs/2402.03300) · [💻 PDF](https://arxiv.org/pdf/2402.03300) · 📦 — | ✅ |
 
@@ -65,3 +71,9 @@ Date-descending. Link style: **[📄 Paper] · [💻 Code] · [📦 Data]**. Exp
 | verl-agent (GiGPO/HGPO/GraphGPO) | [💻](https://github.com/langfengQ/verl-agent) | ✅ |
 | OpenRLHF | [💻](https://github.com/OpenRLHF/OpenRLHF) | ✅ |
 | ProxMO-RL | [💻](https://github.com/FlyTune/ProxMO-RL) | ✅ |
+
+## Foundations
+
+| Date | Work | Role | Link |
+|------|------|------|------|
+| 2019-10 | AWR | Advantage-weighted behavior cloning / weighted SFT foundation for offline RL | [📄](https://arxiv.org/abs/1910.00177) |
