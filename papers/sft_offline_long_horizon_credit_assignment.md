@@ -1,224 +1,224 @@
-# SFT / Offline Credit Assignment for Long-Horizon LLM Agents
+# 面向 Long-Horizon LLM Agent 的 SFT / Offline Credit Assignment
 
-> Research memo and method proposal. Literature checked through **2026-07-15**.
-> Scope: learn a better agent policy from a **frozen set of logged trajectories**, with no environment interaction during policy optimization. Teacher annotation, reference answers, and replay are treated as separate, explicitly labeled regimes.
+> 研究备忘录与方法方案。文献检索截至 **2026-07-15**。
+> 范围：从一组**冻结的已记录轨迹**中学习更好的 agent policy，在 policy optimization 期间不进行环境交互。教师标注、参考答案和 replay 被视为独立设定，并在文中明确标注。
 
-## Executive summary
+## 执行摘要
 
-Standard agent SFT treats every action token in a demonstration as equally correct:
+标准 agent SFT 会把 demonstration 中的每个 action token 都当作同等正确：
 
 $$
 \mathcal L_{\mathrm{SFT}}
 =-\sum_i\sum_{t=1}^{T_i}\log \pi_\theta(a_{i,t}\mid h_{i,t}).
 $$
 
-This is an implicit credit assignment rule, $w_{i,t}=1$. It is particularly fragile for long trajectories: a successful trace can contain loops, unsupported guesses, accidental tool calls, or mistakes repaired much later; a failed trace can contain the right plan, useful evidence, and several completed subgoals. Full-trajectory SFT reinforces the former and discards or penalizes the latter.
+这隐含了一个 credit assignment 规则：$w_{i,t}=1$。对长轨迹来说，这个规则尤其脆弱：成功轨迹中可能包含循环、缺乏证据的猜测、偶然的工具调用，或者很久之后才被修复的错误；失败轨迹中也可能包含正确计划、有用证据和若干已经完成的子目标。全轨迹 SFT 会强化前者，并丢弃或惩罚后者。
 
-The central difficulty is not how to write a weighted SFT loss. It is **identification**: from one logged action and one eventual outcome, the outcome under an unobserved alternative action is generally unknowable. Therefore, a credible offline method should not fabricate a precise score for every step. It should:
+核心难点不是如何写出一个 weighted SFT loss，而是**可识别性**：从一个 logged action 和一个最终 outcome 出发，通常无法知道未被观察到的替代 action 会带来什么结果。因此，一个可信的 offline 方法不应为每一步伪造精确分数，而应该：
 
-1. compare only behaviorally similar states with genuine action overlap;
-2. represent delayed dependencies through evidence and memory provenance;
-3. return an **interval-valued credit estimate** and abstain when its sign is not identifiable;
-4. compile positive, negative, and uncertain segments into different training targets.
+1. 只比较行为上相似、且确实存在 action overlap 的状态；
+2. 通过证据和 memory provenance 表达延迟依赖；
+3. 返回**区间形式的 credit estimate**，当符号不可识别时选择 abstain；
+4. 将正向、负向和不确定片段编译为不同训练目标。
 
-This memo proposes **Conservative Provenance Credit Distillation (CPCD)**. Its operative rule is simple:
+本文提出 **Conservative Provenance Credit Distillation (CPCD)**。其操作规则很简单：
 
-> Give positive SFT credit only when the lower confidence bound is positive; construct a negative preference only when the upper bound is negative and an observed better alternative exists; otherwise keep the segment in context but mask its imitation loss.
+> 只有当置信下界为正时才给予正向 SFT credit；只有当置信上界为负且存在被观察到的更好替代动作时，才构造负向 preference；否则保留该片段作为上下文，但 mask 掉 imitation loss。
 
-The intended contribution is not a claim to recover the true causal value of every logged action. It is a conservative, auditable way to turn heterogeneous long-horizon logs into selective SFT and offline preference data, with explicit support, confounding, and falsification tests.
+这个方法的预期贡献不是声称恢复每个 logged action 的真实因果价值，而是一种保守、可审计的方式：把异质 long-horizon logs 转换为 selective SFT 和 offline preference data，并显式支持 support、confounding 与 falsification tests。
 
 ---
 
-## 1. Problem, motivation, and challenges
+## 1. 问题、动机与挑战
 
-### 1.1 What “offline credit assignment” means here
+### 1.1 这里的 “offline credit assignment” 指什么
 
-Let a logged agent trajectory be
+设一条已记录的 agent trajectory 为
 
 $$
 \tau_i=(x_i,o_{i,1},a_{i,1},o_{i,2},a_{i,2},\ldots,o_{i,T_i},a_{i,T_i},y_i),
 $$
 
-where $x_i$ is the task, $h_{i,t}$ is the prefix available before action $a_{i,t}$, and $y_i\in[0,1]$ is a terminal verifier score. The available dataset is
+其中 $x_i$ 是任务，$h_{i,t}$ 是 action $a_{i,t}$ 之前可见的 prefix，$y_i\in[0,1]$ 是 terminal verifier score。可用数据集为
 
 $$
 \mathcal D=\{(\tau_i,y_i,b_i)\}_{i=1}^{N},
 $$
 
-where $b_i$ optionally records the behavior policy, checkpoint, sampling temperature, and logged action probabilities.
+其中 $b_i$ 可选记录 behavior policy、checkpoint、sampling temperature 和 logged action probabilities。
 
-The desired training objective is
+目标训练目标是
 
 $$
 \mathcal L_{\mathrm{weighted\text{-}SFT}}
 =-\sum_i\sum_t w_{i,t}\log \pi_\theta(a_{i,t}\mid h_{i,t}),
 $$
 
-possibly augmented with preference losses. Credit assignment is the procedure that determines $w_{i,t}$, the masked tokens, and any preferred/dispreferred action pairs.
+也可以加入 preference losses。Credit assignment 的任务是决定 $w_{i,t}$、需要 mask 的 tokens，以及任何 preferred/dispreferred action pairs。
 
-Three regimes must be kept separate:
+需要区分三种设定：
 
-| Regime | Environment calls during optimization | Extra model generation or labels | Examples |
+| 设定 | 优化期间的环境调用 | 额外模型生成或标签 | 例子 |
 |---|---:|---:|---|
-| **Strict fixed-log offline** | No | Optional, but no new environment transitions | ATLaS, Q-SFT, HPL, Agentic-DPO, SWE-Lego |
-| **Offline curation / privileged annotation** | No | Strong teacher, reference solution, patch, or hindsight labeler | STeP, EEF, AgentHER, P2T, ACC |
-| **Semi-online or replay-based** | Yes, before or during each iteration | Often yes | IPR, CSO, HSL as evaluated, SWE-TRACE |
+| **严格 fixed-log offline** | 无 | 可选，但没有新的环境转移 | ATLaS, Q-SFT, HPL, Agentic-DPO, SWE-Lego |
+| **Offline curation / privileged annotation** | 无 | 强教师、参考解、patch 或 hindsight labeler | STeP, EEF, AgentHER, P2T, ACC |
+| **Semi-online 或 replay-based** | 有，在每轮之前或期间 | 通常有 | IPR, CSO, HSL 的实验设定, SWE-TRACE |
 
-The proposed main setting is the first row. The second row is an optional stronger-supervision variant and the third row is used only as an upper bound.
+本文提出的主设定是第一行。第二行是可选的更强监督版本，第三行只作为 upper bound。
 
-### 1.2 Why long horizons make ordinary SFT worse
+### 1.2 为什么 long horizon 会让普通 SFT 更糟
 
-#### Delayed effects
+#### 延迟效应
 
-An observation gathered at turn 7 may support a decision at turn 63. Turn distance is a poor proxy for relevance, so recency masks and uniform discounting miss the actual dependency.
+第 7 turn 收集到的 observation 可能支撑第 63 turn 的决策。turn distance 不是 relevance 的好 proxy，因此 recency mask 和 uniform discounting 会错过真实依赖。
 
-#### Successful trajectories are not clean demonstrations
+#### 成功轨迹不是干净 demonstration
 
-A terminal success label says that the whole interaction eventually worked. It does not certify every search query, file edit, memory update, or reasoning step. Recovery can hide damaging actions.
+terminal success label 只说明整个交互最终成功了，并不证明每个 search query、file edit、memory update 或 reasoning step 都正确。后续恢复可能掩盖有害动作。
 
-#### Failed trajectories are not uniformly bad
+#### 失败轨迹不是全都坏
 
-A failure can be caused by one pivotal action after a long correct prefix. Outcome filtering throws away useful exploration and rare subskills precisely on the hard tasks where successful expert data are sparse.
+失败可能来自长正确 prefix 之后的一个 pivotal action。Outcome filtering 会丢掉有用探索和稀有子技能，而这些恰恰出现在 successful expert data 稀缺的困难任务中。
 
-#### Partial observability creates confounding
+#### 部分可观测性造成 confounding
 
-The teacher may have seen a reference answer, hidden scratchpad, richer browser state, or repository metadata that is absent from the student history. An action can correlate with success because of that hidden information rather than because the action is useful from the student's observable state.
+教师可能看到了 reference answer、隐藏 scratchpad、更完整的 browser state 或 repository metadata，而学生的 history 里没有这些信息。一个 action 可能因为这些隐藏信息而与成功相关，而不是因为它在学生可观测状态下有用。
 
-#### Exact state recurrence is rare
+#### 精确状态复现很罕见
 
-Two 80-turn histories almost never match token for token. Semantic state abstraction is necessary for comparison, but a coarse abstraction may merge states with different constraints, memory contents, or environment side effects.
+两条 80-turn histories 几乎不可能 token-by-token 完全一致。语义状态抽象是比较的必要条件，但过粗的抽象又可能合并约束、memory 内容或环境副作用不同的状态。
 
-#### A long trace can dominate the optimizer
+#### 长轨迹可能主导优化器
 
-Without trajectory-level normalization, a 200-turn trace contributes far more supervised tokens than a 20-turn trace. This confounds “better credit” with simply changing the amount of gradient mass per task.
+如果没有 trajectory-level normalization，一条 200-turn trace 会比一条 20-turn trace 贡献多得多的 supervised tokens。这会把“更好的 credit”与“每个任务的 gradient mass 变化”混在一起。
 
-#### Credit quality is rarely measured directly
+#### Credit quality 很少被直接测量
 
-Most work reports only downstream success. A method may improve because it regularizes training or removes tokens, even if its step scores have little relationship to intervention-derived contribution.
+多数工作只报告 downstream success。一个方法可能只是因为 regularization 或减少 tokens 而提升性能，即使它的 step scores 与 intervention-derived contribution 几乎无关。
 
-### 1.3 Why an offline approach is still worth pursuing
+### 1.3 为什么 offline approach 仍然值得做
 
-Offline agent logs are attractive because expensive environments, browsers, containers, and proprietary tools need not be active during training. Historical deployments also contain diverse failures, recoveries, and behavior policies that ordinary expert-only SFT ignores. Tool metadata, source URLs, file paths, test results, memory source indices, and timestamps provide structural signals unavailable in a plain reasoning transcript.
+Offline agent logs 的吸引力在于，昂贵的环境、浏览器、容器和专有工具在训练期间不需要保持在线。历史部署也包含丰富的失败、恢复和 behavior policies，而普通 expert-only SFT 会忽视这些信息。工具 metadata、source URLs、file paths、test results、memory source indices 和 timestamps 提供了普通 reasoning transcript 中没有的结构信号。
 
-The opportunity is therefore not “infer everything from one trajectory.” It is to combine:
+因此机会不是“从一条轨迹中推断一切”，而是组合：
 
-- **cross-trajectory variation** from multiple policies or stochastic rollouts;
-- **prefix-grounded provenance** that records which evidence was later used;
-- **local verifiers** such as tool schemas, tests, and state diffs;
-- **conservative uncertainty estimates** that turn missing support into abstention rather than a guessed label.
+- 来自多 policy 或 stochastic rollouts 的 **cross-trajectory variation**；
+- 记录哪些证据后来被使用的 **prefix-grounded provenance**；
+- 工具 schema、测试和 state diffs 等 **local verifiers**；
+- 将缺少 support 变成 abstention、而不是猜测标签的 **conservative uncertainty estimates**。
 
-This can reduce the cost and instability of online RL while producing an SFT-compatible artifact that can be inspected before training.
+这可以降低 online RL 的成本和不稳定性，同时产出一个 SFT-compatible artifact，并且可以在训练前人工检查。
 
-### 1.4 The unavoidable identifiability limit
+### 1.4 无法绕过的可识别性限制
 
-Suppose every logged trajectory reaching abstract state $c$ takes action $u$ and succeeds. The observed data are compatible with both of these worlds:
+假设所有到达抽象状态 $c$ 的 logged trajectories 都采取 action $u$ 并成功。观测数据同时兼容两个世界：
 
-- every alternative action would fail, so $u$ is pivotal;
-- an alternative action would also succeed, so $u$ is unnecessary.
+- 所有替代 action 都会失败，因此 $u$ 是 pivotal；
+- 某个替代 action 也会成功，因此 $u$ 并非必要。
 
-No estimator can distinguish these worlds from the fixed logs. A point credit score in this case is a modeling assumption, not an identified causal effect.
+没有任何 estimator 能仅从 fixed logs 中区分这两个世界。此时 point credit score 是 modeling assumption，而不是 identified causal effect。
 
-Consequently, CPCD requires either repeated action variation in comparable states or returns a vacuous interval. Its causal interpretation is conditional on:
+因此 CPCD 要求在可比较状态中存在 repeated action variation，否则返回 vacuous interval。其因果解释依赖以下假设：
 
-1. **consistency:** the abstract action corresponds to a stable intervention;
-2. **overlap:** plausible alternatives occur with non-negligible probability;
-3. **sequential ignorability:** the recorded prefix representation contains the important common causes of action and outcome, up to an explicit sensitivity allowance;
-4. **stable continuation:** after the compared segment, value is defined under the logged continuation-policy mixture.
+1. **consistency:** 抽象 action 对应稳定 intervention；
+2. **overlap:** 合理替代动作以非忽略概率出现；
+3. **sequential ignorability:** 记录的 prefix representation 包含 action 和 outcome 的重要 common causes，允许显式 sensitivity allowance；
+4. **stable continuation:** 在被比较 segment 之后，value 定义在 logged continuation-policy mixture 下。
 
-Without these assumptions, the output should be called **observational utility credit**, not causal credit.
+如果缺少这些假设，输出应称为 **observational utility credit**，而不是 causal credit。
 
-### 1.5 Minimum useful data contract
+### 1.5 最小可用数据契约
 
-| Field | Status | Why it matters |
+| 字段 | 状态 | 为什么重要 |
 |---|---|---|
-| Task ID and task-family ID | Required | Prevents train/test leakage and enables task-clustered uncertainty |
-| Ordered actions and observations | Required | Defines prefixes and delayed dependencies |
-| Terminal verifier outcome | Required | Supplies the final utility being attributed |
-| Multiple trajectories per task or support cell | Required for signed credit | Provides action overlap; a single expert trace supports masking heuristics only |
-| Tool-call IDs, result IDs, file/URL/test metadata | Strongly recommended | Enables deterministic provenance edges |
-| Behavior policy/checkpoint/temperature | Strongly recommended | Makes propensity modeling and policy-mixture analysis more credible |
-| Logged action probabilities | Recommended | Reduces propensity-model error; not mandatory if action classes are discrete |
-| Restorable state snapshots | Evaluation only | Enables intervention-derived credit labels without making training online |
-| Reference answer or patch | Optional privileged variant | Useful for comparison, but excluded from the primary fixed-log estimator |
+| Task ID 与 task-family ID | 必需 | 防止 train/test leakage，并支持 task-clustered uncertainty |
+| 有序 actions 与 observations | 必需 | 定义 prefixes 和延迟依赖 |
+| Terminal verifier outcome | 必需 | 提供需要归因的最终 utility |
+| 每个任务或 support cell 的多条 trajectories | signed credit 必需 | 提供 action overlap；单条 expert trace 只能支持 masking heuristic |
+| Tool-call IDs、result IDs、file/URL/test metadata | 强烈推荐 | 支持 deterministic provenance edges |
+| Behavior policy/checkpoint/temperature | 强烈推荐 | 让 propensity modeling 和 policy-mixture analysis 更可信 |
+| Logged action probabilities | 推荐 | 降低 propensity-model error；若 action classes 是离散的，则不是必需 |
+| 可恢复 state snapshots | 仅用于评估 | 支持 intervention-derived credit labels，而不把训练变成 online |
+| Reference answer 或 patch | 可选 privileged variant | 对比较有用，但排除在 primary fixed-log estimator 之外 |
 
 ---
 
-## 2. Related work and reusable ideas
+## 2. 相关工作与可复用思想
 
-### 2.1 Direct SFT and offline trajectory methods
+### 2.1 直接相关的 SFT 与 offline trajectory 方法
 
-| Work | Regime | Credit or curation signal | Training target | What it contributes | Main boundary for this project |
+| 工作 | 设定 | Credit 或 curation 信号 | 训练目标 | 贡献 | 对本项目的边界 |
 |---|---|---|---|---|---|
-| [AWR](https://arxiv.org/abs/1910.00177) (2019) | Offline RL foundation | Learned advantage | Advantage-weighted behavior cloning | Canonical weighted maximum-likelihood view | Scalar value estimates can extrapolate outside support; not an LLM-agent method |
-| [Q-SFT](https://arxiv.org/abs/2411.05193) (2024) | Static transition/reward data | Bellman/Q target encoded in token probability | Modified SFT without a separate value head | Shows that offline value learning can retain an SFT-like objective | Requires transition rewards and inherits offline Q-learning assumptions |
-| [IPR / Watch Every Step](https://arxiv.org/abs/2406.11176) (2024) | Semi-online | Monte Carlo continuations from expert prefixes | SFT plus step/outcome preferences | Direct intervention-style estimate of expert-step value | Intermediate environment rollout is expensive and violates strict offline training |
-| [ATLaS](https://arxiv.org/abs/2503.02197) (2025) | Fixed trajectories plus LLM selector | Binary critical-step labels for planning, key observations/actions, and self-correction | Full context, loss only on selected steps | Clean separation between “visible as context” and “learned as target” | Importance is judged, not estimated from counterfactual outcomes; hard mask has no uncertainty |
-| [EEF](https://arxiv.org/abs/2504.13145) (2025) | Offline data curation | Beneficial plans/actions mined from failed expert traces | Add useful failure fragments to fine-tuning | Establishes that failed trajectories should not be rejected wholesale | Credit depends on the failure-analysis heuristic and is not calibrated |
-| [STeP](https://arxiv.org/abs/2505.20023) (2025) | Teacher-generated offline traces | Error, reflection, and correction labels | Keep errors in context but mask their loss | Demonstrates target/context separation for self-correction traces | Requires synthetic reflection quality; mostly explicit error masking |
-| [Reward-Weighted Fine-Tuning](https://arxiv.org/abs/2506.06964) (2025) | Offline outcome-labeled traces | One trajectory reward | Reward-weighted SFT | Strong trajectory-level offline baseline | Broadcasts the same reward to every action, so it does not solve within-trace credit |
-| [HPL](https://arxiv.org/abs/2510.03253) (2025) | Offline preference learning | Trajectory-, action-group-, and step-level preferences | Hierarchical DPO with curriculum | Useful multi-scale segmentation and preference formulation | Requires contrasting groups and gives no support-aware abstention |
-| [DML-IL](https://arxiv.org/abs/2502.07656) (2025) | Causal imitation-learning foundation | Conditional moment restrictions; histories as instruments | History-dependent imitation policy | Makes hidden confounding and trajectory history mathematically explicit | Validated in classical control, not language-agent traces; instrumental assumptions remain strong |
-| [SWE-Lego](https://arxiv.org/abs/2601.01426) (2026) | SFT-only SWE training | Explicit tool-error masking and difficulty curriculum | Masked SFT on validated trajectories | Direct long-horizon SFT baseline with 18K validated traces and turn-length curriculum | Tool errors catch visible failures, not semantic detours or delayed evidence misuse |
-| [InT](https://arxiv.org/abs/2601.14209) (2026) | On-policy reasoning traces plus references | First-error localization and one-step corrective intervention | SFT on correct prefix plus correction, then RL | Precise error-boundary supervision | Reasoning-only, reference-dependent, and not fixed-log agent training |
-| [AgentHER](https://arxiv.org/abs/2603.21357) (2026) | Offline hindsight relabeling | Failure type, actually achieved outcome, confidence gate | Relabeled SFT/DPO examples | Converts some failures into goal-conditioned successes | Changes the task label rather than estimating contribution to the original goal |
-| [P2T](https://arxiv.org/abs/2605.21996) (2026) | Privileged SWE curation | Reference patch to latent process graph; grounded progress and length | SFT on shortest effective segments | Closest provenance/process-graph inspiration for realistic SWE horizons | Needs a reference patch, executable tests, teacher continuations, and LLM judges |
-| [ACC](https://arxiv.org/abs/2605.21850) (2026) | Offline trajectory compilation | Distant tool observations become long-context QA evidence | Direct-answer SFT | Shows how logged evidence can supervise long-range integration | Trains context reasoning, not action-level utility credit |
-| [HSL / Spinning Straw into Gold](https://arxiv.org/abs/2607.04235) (2026) | Hindsight relabeling; evaluated with iterative rollouts | Achieved goals, irrelevant-action mask, sample weight | SFT or DPO on relabeled goals | Uses unintended successes and reports larger gains on long horizons | The evaluated pipeline collects new trajectories and optimizes relabeled goals, so it is not a strict fixed-log answer by itself |
-| [Agentic-DPO](https://arxiv.org/abs/2607.10601) (2026) | No environment interaction during optimization | Expert action vs one-step student negative at each expert state | DPO plus SFT anchor and policy-preserving augmentation | Closest recent strict-offline state-conditioned action baseline; tested on tau-bench retail and Mind2Web | Every expert action is presumed preferred; student-only states and useful failure segments are not covered |
+| [AWR](https://arxiv.org/abs/1910.00177) (2019) | Offline RL 基础 | Learned advantage | Advantage-weighted behavior cloning | 经典 weighted maximum-likelihood 视角 | 标量 value estimates 可能在 support 外 extrapolate；不是 LLM-agent 方法 |
+| [Q-SFT](https://arxiv.org/abs/2411.05193) (2024) | 静态 transition/reward data | 编码在 token probability 中的 Bellman/Q target | 无独立 value head 的 modified SFT | 说明 offline value learning 可保持 SFT-like objective | 需要 transition rewards，并继承 offline Q-learning 假设 |
+| [IPR / Watch Every Step](https://arxiv.org/abs/2406.11176) (2024) | Semi-online | 从 expert prefixes 出发的 Monte Carlo continuations | SFT 加 step/outcome preferences | 直接的 intervention-style expert-step value estimate | 中间环境 rollout 昂贵，且违反 strict offline training |
+| [ATLaS](https://arxiv.org/abs/2503.02197) (2025) | Fixed trajectories 加 LLM selector | planning、关键 observations/actions、self-correction 的二值 critical-step labels | 完整 context，只在 selected steps 上计算 loss | 清楚地区分“作为 context 可见”和“作为 target 学习” | 重要性由 judge 判断，不来自 counterfactual outcomes；hard mask 无 uncertainty |
+| [EEF](https://arxiv.org/abs/2504.13145) (2025) | Offline data curation | 从 failed expert traces 中挖掘 beneficial plans/actions | 把有用失败片段加入 fine-tuning | 证明 failed trajectories 不应整体丢弃 | Credit 依赖 failure-analysis heuristic，且未校准 |
+| [STeP](https://arxiv.org/abs/2505.20023) (2025) | Teacher-generated offline traces | Error、reflection 与 correction labels | 错误保留在 context 中，但 mask 其 loss | 展示 self-correction traces 中的 target/context separation | 依赖 synthetic reflection quality；主要是显式 error masking |
+| [Reward-Weighted Fine-Tuning](https://arxiv.org/abs/2506.06964) (2025) | Offline outcome-labeled traces | 单个 trajectory reward | Reward-weighted SFT | 强 trajectory-level offline baseline | 把同一个 reward 广播给每个 action，不能解决 within-trace credit |
+| [HPL](https://arxiv.org/abs/2510.03253) (2025) | Offline preference learning | Trajectory-, action-group-, step-level preferences | 带 curriculum 的 hierarchical DPO | 有用的多尺度 segmentation 和 preference formulation | 需要 contrasting groups，且没有 support-aware abstention |
+| [DML-IL](https://arxiv.org/abs/2502.07656) (2025) | Causal imitation-learning 基础 | Conditional moment restrictions；histories as instruments | History-dependent imitation policy | 明确建模 hidden confounding 和 trajectory history | 在 classical control 中验证，不是 language-agent traces；instrumental assumptions 仍然很强 |
+| [SWE-Lego](https://arxiv.org/abs/2601.01426) (2026) | SFT-only SWE training | 显式 tool-error masking 与 difficulty curriculum | 在 validated trajectories 上做 masked SFT | 直接的 long-horizon SFT baseline，含 18K validated traces 和 turn-length curriculum | Tool errors 只捕捉可见失败，不捕捉语义 detours 或延迟证据误用 |
+| [InT](https://arxiv.org/abs/2601.14209) (2026) | On-policy reasoning traces 加 references | First-error localization 与 one-step corrective intervention | 正确 prefix 加 correction 的 SFT，然后 RL | 精确 error-boundary supervision | 仅 reasoning、依赖 reference，且不是 fixed-log agent training |
+| [AgentHER](https://arxiv.org/abs/2603.21357) (2026) | Offline hindsight relabeling | Failure type、actually achieved outcome、confidence gate | Relabeled SFT/DPO examples | 把部分失败转换为 goal-conditioned successes | 改变 task label，而不是估计对原始目标的贡献 |
+| [P2T](https://arxiv.org/abs/2605.21996) (2026) | Privileged SWE curation | 从 reference patch 到 latent process graph；grounded progress 与 length | 在 shortest effective segments 上做 SFT | 对真实 SWE horizon 最接近的 provenance/process-graph 启发 | 需要 reference patch、可执行测试、teacher continuations 和 LLM judges |
+| [ACC](https://arxiv.org/abs/2605.21850) (2026) | Offline trajectory compilation | 远距离 tool observations 变成 long-context QA evidence | Direct-answer SFT | 展示 logged evidence 如何监督长程 integration | 训练 context reasoning，而非 action-level utility credit |
+| [HSL / Spinning Straw into Gold](https://arxiv.org/abs/2607.04235) (2026) | Hindsight relabeling；实验中使用 iterative rollouts | Achieved goals、irrelevant-action mask、sample weight | 在 relabeled goals 上做 SFT 或 DPO | 利用 unintended successes，并报告 long horizons 上更大收益 | 实验 pipeline 会收集新 trajectories 并优化 relabeled goals，因此本身不是 strict fixed-log 解法 |
+| [Agentic-DPO](https://arxiv.org/abs/2607.10601) (2026) | 优化期间无环境交互 | 每个 expert state 上的 expert action vs one-step student negative | DPO 加 SFT anchor 与 policy-preserving augmentation | 最近最接近的 strict-offline state-conditioned action baseline；在 tau-bench retail 与 Mind2Web 上测试 | 默认每个 expert action 都是 preferred；不覆盖 student-only states 和有用 failure segments |
 
-### 2.2 Adjacent work that should shape the method or evaluation
+### 2.2 应影响方法或评估的相邻工作
 
-| Work | Reusable idea | How it affects this proposal |
+| 工作 | 可复用思想 | 对本方案的影响 |
 |---|---|---|
-| [ECHO](https://arxiv.org/abs/2606.31650) | Source-indexed memory and credit routing to evidence turns and selection actions | Motivates a provenance graph, but CPCD estimates utility from fixed logs and can abstain rather than routing only positive terminal credit |
-| [CSO](https://arxiv.org/abs/2602.03412) | Identify critical steps, generate expert alternatives, branch from those states, verify outcomes | Serves as a semi-online upper bound and a recipe for evaluation-only intervention labels |
-| [SWE-TRACE](https://arxiv.org/abs/2604.14820) | Rubric process reward and long-token SWE evaluation | Supplies a realistic process-judge baseline and horizon-stratified evaluation |
-| [HORIZON](https://arxiv.org/abs/2604.11978) | Failure attribution over 3,100+ multi-domain trajectories | Motivates direct credit-quality and root-cause metrics rather than success-only reporting |
-| [OpenResearcher](https://arxiv.org/abs/2603.20278) | Large offline deep-research corpus with a long tail beyond 100 tool calls | Provides a candidate data source and a genuinely long-horizon stress test |
-| [CFT](https://arxiv.org/abs/2510.10974) and [DFT](https://arxiv.org/abs/2508.05629) | Selective or dynamically reweighted token SFT | Useful optimization controls, but token salience is not delayed action contribution |
-| [CurateEvo](https://arxiv.org/abs/2607.06140) | Held-out failures drive iterative data-curation programs | Useful system-level baseline; it optimizes the curator rather than identifying step effects in one frozen log set |
+| [ECHO](https://arxiv.org/abs/2606.31650) | Source-indexed memory 与 credit routing 到 evidence turns 和 selection actions | 启发 provenance graph；但 CPCD 从 fixed logs 中估计 utility，并且可以 abstain，而不是只路由正向 terminal credit |
+| [CSO](https://arxiv.org/abs/2602.03412) | 识别 critical steps、生成 expert alternatives、从这些状态 branch、验证 outcomes | 作为 semi-online upper bound，也作为 evaluation-only intervention labels 的方案 |
+| [SWE-TRACE](https://arxiv.org/abs/2604.14820) | Rubric process reward 与 long-token SWE evaluation | 提供真实 process-judge baseline 和 horizon-stratified evaluation |
+| [HORIZON](https://arxiv.org/abs/2604.11978) | 对 3,100+ multi-domain trajectories 做 failure attribution | 启发直接 credit-quality 与 root-cause metrics，而不只报告 success |
+| [OpenResearcher](https://arxiv.org/abs/2603.20278) | 含 100+ tool calls 长尾的大规模 offline deep-research corpus | 候选数据源和真正 long-horizon stress test |
+| [CFT](https://arxiv.org/abs/2510.10974) 与 [DFT](https://arxiv.org/abs/2508.05629) | Selective 或 dynamically reweighted token SFT | 有用的 optimization controls，但 token salience 不等于延迟 action contribution |
+| [CurateEvo](https://arxiv.org/abs/2607.06140) | 用 held-out failures 驱动 iterative data-curation programs | 有用的 system-level baseline；它优化 curator，而不是在冻结 logs 中识别 step effects |
 
-### 2.3 What is still missing
+### 2.3 仍然缺失什么
 
-The direct literature covers hard step selection, explicit error masking, failure mining, Q/advantage weighting, hindsight goal relabeling, and state-conditioned preferences. The remaining gap is the combination of:
+直接相关文献已经覆盖 hard step selection、显式 error masking、failure mining、Q/advantage weighting、hindsight goal relabeling 和 state-conditioned preferences。剩余空白是把以下几项结合起来：
 
-1. **strictly offline, long-horizon agent traces** rather than short reasoning responses;
-2. **failure and recovery-aware signed credit**, not an assumption that every expert action is positive;
-3. **semantic provenance** for dependencies spanning many turns;
-4. **support-aware uncertainty and abstention**, instead of a scalar score for every step;
-5. **direct causal-credit evaluation** using held-out interventions.
+1. **严格 offline、long-horizon agent traces**，而不是短 reasoning responses；
+2. **failure 与 recovery-aware signed credit**，而不是假设每个 expert action 都是正向；
+3. 表达跨很多 turns 依赖的 **semantic provenance**；
+4. **support-aware uncertainty and abstention**，而不是为每一步给 scalar score；
+5. 使用 held-out interventions 的**直接 causal-credit evaluation**。
 
-### 2.4 Closest-work comparison
+### 2.4 Closest-work 对比
 
-| Dimension | ATLaS | Agentic-DPO | P2T | DML-IL | Proposed CPCD |
+| 维度 | ATLaS | Agentic-DPO | P2T | DML-IL | Proposed CPCD |
 |---|---|---|---|---|---|
-| Main supervision | LLM criticality label | Expert vs sampled action | Reference-patch process graph | Conditional moments from demonstrations | Outcome variation plus logged provenance |
-| Uses failed traces | Not central | No | Teacher failures can inform curation | General demonstrations | Yes, if matched support exists |
-| Negative credit | Mask unselected steps | Preference against sampled negative | Remove inefficient/ungrounded segments | Implicit through policy estimation | Only when interval is strictly negative and a positive logged alternative exists |
-| Long-delay representation | Full text context | Expert state prefix | Privileged process graph | History-dependent policy | Source-to-use provenance DAG |
-| Handles no support | No explicit mechanism | Samples a plausible negative | Judge/privileged score | Depends on identification assumptions | Returns a vacuous interval and masks loss |
-| Causal-credit metric | No | No | Progress/grounding analyses | Imitation gap | Intervention sign, risk-coverage, and calibration |
+| 主要监督 | LLM criticality label | Expert vs sampled action | Reference-patch process graph | 来自 demonstrations 的 conditional moments | Outcome variation 加 logged provenance |
+| 使用 failed traces | 不是核心 | 否 | Teacher failures 可用于 curation | 一般 demonstrations | 是，若存在 matched support |
+| Negative credit | Mask unselected steps | 对 sampled negative 做 preference | 移除低效/不 grounded 片段 | 通过 policy estimation 隐式体现 | 只有 interval 严格为负且存在正向 logged alternative 时使用 |
+| 长延迟表达 | 完整 text context | Expert state prefix | Privileged process graph | History-dependent policy | Source-to-use provenance DAG |
+| 无 support 时如何处理 | 无显式机制 | sample 一个 plausible negative | Judge/privileged score | 依赖 identification assumptions | 返回 vacuous interval 并 mask loss |
+| Causal-credit metric | 无 | 无 | Progress/grounding analyses | Imitation gap | Intervention sign、risk-coverage 与 calibration |
 
-This comparison defines the novelty boundary. CPCD should not claim that selective SFT, process graphs, doubly robust estimation, or DPO are individually new.
+这个对比定义了 novelty boundary。CPCD 不应声称 selective SFT、process graphs、doubly robust estimation 或 DPO 本身是新的。
 
 ---
 
 ## 3. Proposed method: Conservative Provenance Credit Distillation
 
-### 3.1 Research question and hypotheses
+### 3.1 Research question 与 hypotheses
 
-**Research question.** Can a frozen, heterogeneous set of long-horizon agent logs support reliable signed segment credit, and can conservative use of that credit outperform full SFT and offline preference baselines without additional environment interaction?
+**研究问题。** 一个冻结的、异质的 long-horizon agent logs 集合能否支持可靠的 signed segment credit？在不增加环境交互的前提下，保守使用这种 credit 能否优于 full SFT 和 offline preference baselines？
 
-Pre-registered hypotheses:
+预注册假设：
 
-- **H1, selective utility:** certified-positive segments improve Success@1 over full SFT and random masks at the same supervised-token budget.
-- **H2, long-delay structure:** provenance improves credit precision and task performance increasingly with source-to-use distance and total trajectory length.
-- **H3, conservatism:** interval abstention lowers false-sign credit and improves the risk-coverage curve relative to point estimates.
-- **H4, failure reuse:** positive segments recovered from failed trajectories provide gains on hard/OOD tasks beyond success-only training.
+- **H1, selective utility:** 在相同 supervised-token budget 下，certified-positive segments 比 full SFT 和 random masks 带来更高 Success@1。
+- **H2, long-delay structure:** source-to-use distance 和总 trajectory length 越大，provenance 对 credit precision 与 task performance 的帮助越明显。
+- **H3, conservatism:** interval abstention 相比 point estimates 能降低 false-sign credit，并改善 risk-coverage curve。
+- **H4, failure reuse:** 从 failed trajectories 中恢复的 positive segments 能在 hard/OOD tasks 上提供超出 success-only training 的收益。
 
-### 3.2 One central principle
+### 3.2 一个核心原则
 
-The method is a compiler from frozen logs to training targets:
+该方法是一个从 frozen logs 到 training targets 的 compiler：
 
 ```text
 frozen trajectories
@@ -242,92 +242,92 @@ sensitivity-aware credit interval [L, U]
  weighted SFT     observed-pair DPO     context-only mask
 ```
 
-The graph, estimator, and verifier are training-time components only. Inference uses the fine-tuned policy without a critic or provenance extractor.
+graph、estimator 和 verifier 仅是训练时组件。推理时使用 fine-tuned policy，不需要 critic 或 provenance extractor。
 
-### 3.3 Step 1: build a typed provenance DAG
+### 3.3 Step 1: 构建 typed provenance DAG
 
-For each trajectory, construct a directed acyclic graph $G_i=(V_i,E_i)$ with timestamped nodes:
+对每条 trajectory，构造有时间戳节点的有向无环图 $G_i=(V_i,E_i)$：
 
-- task constraints and subgoals;
-- tool actions and environment state changes;
-- observations and evidence spans;
-- memory writes, updates, retrievals, and summaries;
-- claims or decisions that use earlier evidence;
-- locally verified milestones;
-- terminal outcome.
+- task constraints 与 subgoals；
+- tool actions 与 environment state changes；
+- observations 与 evidence spans；
+- memory writes、updates、retrievals 与 summaries；
+- 使用早期证据的 claims 或 decisions；
+- locally verified milestones；
+- terminal outcome。
 
-Edges are typed as `produces`, `supports`, `uses`, `updates`, `retrieves`, `enables`, or `verifies`.
+边类型为 `produces`、`supports`、`uses`、`updates`、`retrieves`、`enables` 或 `verifies`。
 
-Construction follows a strict priority:
+构造时遵循严格优先级：
 
-1. deterministic metadata edges from tool-call/result IDs, file paths, URLs, test IDs, and memory source indices;
-2. schema rules for state transitions and milestone checks;
-3. a prefix-only semantic extractor for support/use edges.
+1. 来自 tool-call/result IDs、file paths、URLs、test IDs 和 memory source indices 的 deterministic metadata edges；
+2. state transitions 与 milestone checks 的 schema rules；
+3. 只看 prefix 的 semantic extractor，用于 support/use edges。
 
-The extractor may see the current prefix but not future observations, the terminal reference answer, or the developer patch in the primary setting. Every semantic edge must cite an earlier source span. Edges that point backward in time or lack a source are rejected.
+在 primary setting 中，extractor 可以看到当前 prefix，但不能看到未来 observations、terminal reference answer 或 developer patch。每条 semantic edge 都必须引用一个更早的 source span。指向未来或缺少 source 的边会被拒绝。
 
-The DAG is an **eligibility structure**, not proof of causality. It answers “could this earlier segment support this later decision?”; outcome variation determines whether the eligible segment receives positive or negative utility credit.
+DAG 是一种 **eligibility structure**，不是因果证明。它回答“这个早期 segment 是否可能支持这个后续 decision？”；eligible segment 是获得正向还是负向 utility credit，由 outcome variation 决定。
 
-### 3.4 Step 2: define semantic segments and treatments
+### 3.4 Step 2: 定义 semantic segments 与 treatments
 
-Turn-level credit is too fine for multi-call subroutines and too coarse for mixed thought/action turns. Collapse the trace into semantic segments $z_{i,j}$ using deterministic boundaries:
+Turn-level credit 对多调用 subroutines 来说太细，对混合 thought/action turns 又太粗。使用 deterministic boundaries 将 trace 折叠为 semantic segments $z_{i,j}$：
 
-- a tool call and its returned observation;
-- a memory operation and its cited sources;
-- an edit followed by a local test;
-- a search/read sequence that yields one evidence item;
-- a plan/subgoal transition;
-- a final decision or answer claim.
+- 一个 tool call 及其返回 observation；
+- 一个 memory operation 及其引用 sources；
+- 一次 edit 及其随后的 local test；
+- 产生一个 evidence item 的 search/read sequence；
+- 一次 plan/subgoal transition；
+- final decision 或 answer claim。
 
-For each segment define:
+对每个 segment 定义：
 
 $$
 c_{i,j}=\phi(h_{i,j}), \qquad u_{i,j}=\psi(z_{i,j}),
 $$
 
-where $c$ is a support-cell representation and $u$ is a semantic action class.
+其中 $c$ 是 support-cell representation，$u$ 是 semantic action class。
 
-$\phi(h)$ includes task constraints, verified milestones, available tools, environment fingerprints, current memory contents, behavior-policy ID, and compact provenance features. $\psi(z)$ includes an event type and normalized effect signature, for example `read(file, symbol-family)`, `run(test-scope)`, `search(query-intent)`, `edit(component, operation-type)`, or `retrieve(memory-topic)`.
+$\phi(h)$ 包括 task constraints、verified milestones、available tools、environment fingerprints、current memory contents、behavior-policy ID 和 compact provenance features。$\psi(z)$ 包括 event type 和 normalized effect signature，例如 `read(file, symbol-family)`、`run(test-scope)`、`search(query-intent)`、`edit(component, operation-type)` 或 `retrieve(memory-topic)`。
 
-Exact output tokens remain the SFT target. The abstraction is used only to find comparable logged decisions.
+精确 output tokens 仍然是 SFT target。抽象表示只用于寻找可比较的 logged decisions。
 
 #### Action-class audit
 
-A semantic class is invalid if its members lead to materially different next-state effects under otherwise similar prefixes. On a held-out fold:
+如果一个 semantic class 的成员在其他相似 prefixes 下会导致实质不同的 next-state effects，则该 class 无效。在 held-out fold 上：
 
-1. compute normalized next-observation or state-diff signatures;
-2. measure within-class disagreement after conditioning on $c$;
-3. split a class whose disagreement exceeds the held-out 90th-percentile noise floor;
-4. if no stable split has adequate support, assign $[-1,1]$ credit to the class.
+1. 计算 normalized next-observation 或 state-diff signatures；
+2. 在 conditioning on $c$ 之后测量 within-class disagreement；
+3. 若 disagreement 超过 held-out 90th-percentile noise floor，则拆分该 class；
+4. 如果没有稳定 split 具有足够 support，则给该 class 赋予 $[-1,1]$ credit。
 
-This prevents a broad class such as `read(file)` from being treated as one stable action when the chosen file is decisive.
+这可以避免把 `read(file)` 这种宽泛 class 当作一个稳定 action，即使具体读哪个文件才是决定性因素。
 
-### 3.5 Step 3: define the estimand
+### 3.5 Step 3: 定义 estimand
 
-For a support cell $c$ and semantic action $u$, define the natural-continuation value
+对 support cell $c$ 和 semantic action $u$，定义 natural-continuation value：
 
 $$
 V(u,c)=\mathbb E\left[Y\mid \operatorname{do}(U=u),C=c,
 \text{future follows the logged policy mixture}\right].
 $$
 
-Credit is a contrast against observed alternative actions:
+Credit 是相对于 observed alternative actions 的 contrast：
 
 $$
 \Delta(u,c)=V(u,c)-
 \sum_{v\ne u}\bar e(v\mid c,U\ne u)V(v,c),
 $$
 
-where $\bar e$ is the behavior-policy mixture restricted to alternatives. This estimand asks whether choosing $u$ was better than the alternatives actually represented in the logs. It does not estimate an unconstrained optimal action, and it does not hold future actions fixed token by token.
+其中 $\bar e$ 是限制在 alternatives 上的 behavior-policy mixture。这个 estimand 问的是：选择 $u$ 是否优于 logs 中实际出现过的 alternatives。它不估计 unconstrained optimal action，也不要求未来 actions token-by-token 固定。
 
-### 3.6 Step 4: estimate credit with cross-fitted doubly robust learning
+### 3.6 Step 4: 用 cross-fitted doubly robust learning 估计 credit
 
-Split data by task or repository, never by segment. For each held-out fold, fit on the remaining folds:
+按 task 或 repository 切分数据，绝不按 segment 切分。对每个 held-out fold，在其余 folds 上拟合：
 
-- a behavior propensity model $\hat e(u\mid c)$;
-- an outcome model $\hat Q(c,u)\approx\mathbb E[Y\mid C=c,U=u]$.
+- behavior propensity model $\hat e(u\mid c)$；
+- outcome model $\hat Q(c,u)\approx\mathbb E[Y\mid C=c,U=u]$。
 
-For action $u$ in a local support cell, use the doubly robust estimate
+对 local support cell 中的 action $u$，使用 doubly robust estimate：
 
 $$
 \hat V(u,c)=\frac{1}{|I(c)|}\sum_{k\in I(c)}
@@ -338,70 +338,70 @@ $$
 \right].
 $$
 
-The contrast $\hat\Delta(u,c)$ uses the same observed-alternative mixture as the estimand. Cross-fitting prevents the segment being scored by nuisance models trained on its own task outcome. Standard errors and bootstrap resampling are clustered by task because all segments in a trajectory share a terminal outcome.
+contrast $\hat\Delta(u,c)$ 使用与 estimand 相同的 observed-alternative mixture。Cross-fitting 防止某个 segment 被在它自身 task outcome 上训练过的 nuisance models 评分。由于同一 trajectory 中所有 segments 共享 terminal outcome，standard errors 与 bootstrap resampling 需要按 task cluster。
 
-Under overlap and sequential ignorability, a doubly robust estimator is consistent if either the propensity model or outcome model is correctly specified. This protection does **not** eliminate hidden confounding or repair an invalid action abstraction.
+在 overlap 和 sequential ignorability 成立时，若 propensity model 或 outcome model 任一正确指定，doubly robust estimator 就是一致的。这种保护**不能**消除 hidden confounding，也不能修复无效的 action abstraction。
 
 #### Support gates
 
-Initial conservative defaults, to be calibrated in the pilot:
+初始保守默认值，后续在 pilot 中校准：
 
-- each compared action has $\hat e(u\mid c)\ge 0.05$;
-- inverse-propensity effective sample size is at least 20;
-- at least two behavior-policy sources contribute to a pooled support cell when possible;
-- no single task contributes more than 10% of the local weight.
+- 每个被比较 action 满足 $\hat e(u\mid c)\ge 0.05$；
+- inverse-propensity effective sample size 至少为 20；
+- 可能时，pooled support cell 至少由两个 behavior-policy sources 贡献；
+- 单个 task 贡献不超过 local weight 的 10%。
 
-If a gate fails, the interval is set to the vacuous range $[-1,1]$ rather than extrapolating.
+如果 gate 失败，interval 设为 vacuous range $[-1,1]$，而不是 extrapolate。
 
-### 3.7 Step 5: produce sensitivity-aware credit intervals
+### 3.7 Step 5: 生成 sensitivity-aware credit intervals
 
-For every supported segment, construct $[L_{i,j},U_{i,j}]$ using:
+对每个 supported segment，使用以下信息构造 $[L_{i,j},U_{i,j}]$：
 
-1. task-clustered bootstrap uncertainty;
-2. simultaneous max-$t$ correction across the segment classes being selected;
-3. disagreement among matched semantic neighbors;
-4. an odds-ratio hidden-confounding sensitivity parameter $\Gamma$.
+1. task-clustered bootstrap uncertainty；
+2. 对被选择 segment classes 的 simultaneous max-$t$ correction；
+3. matched semantic neighbors 之间的 disagreement；
+4. odds-ratio hidden-confounding sensitivity parameter $\Gamma$。
 
-Report $\Gamma\in\{1,1.25,1.5,2\}$; use $\Gamma=1.5$ as the pre-registered main setting only after a held-out calibration pilot. A result that disappears at $\Gamma=1.25$ should be described as fragile observational evidence.
+报告 $\Gamma\in\{1,1.25,1.5,2\}$；只有在 held-out calibration pilot 后，才把 $\Gamma=1.5$ 作为预注册主设定。若结果在 $\Gamma=1.25$ 时就消失，应描述为 fragile observational evidence。
 
-The interval has three states:
+interval 有三种状态：
 
-| Interval | Interpretation | Allowed training use |
+| Interval | 解释 | 允许的训练用途 |
 |---|---|---|
-| $L>0$ | Reliably positive under the stated support/sensitivity model | Weighted SFT if also grounded |
-| $U<0$ | Reliably negative | Preference against it only when a positive observed alternative exists |
-| $L\le 0\le U$ | Ambiguous or unsupported | Context only; mask semantic action/reasoning loss |
+| $L>0$ | 在指定 support/sensitivity model 下可靠为正 | 若也 grounded，则用于 weighted SFT |
+| $U<0$ | 可靠为负 | 只有存在正向 observed alternative 时才构造 preference against it |
+| $L\le 0\le U$ | 模糊或 unsupported | 仅作为 context；mask semantic action/reasoning loss |
 
-### 3.8 Step 6: separate groundedness from utility
+### 3.8 Step 6: 将 groundedness 与 utility 分离
 
-A high-outcome correlation can still reward an unsupported guess. Compute a prefix-only groundedness score $g_{i,j}\in[0,1]$ from:
+高 outcome correlation 仍可能奖励缺乏证据的猜测。使用以下信息计算 prefix-only groundedness score $g_{i,j}\in[0,1]$：
 
-- tool/schema validity;
-- consistency with prior environment observations;
-- evidence entailment for emitted claims;
-- absence of future/reference leakage;
-- local state-effect verification where available.
+- tool/schema validity；
+- 与先前 environment observations 的一致性；
+- emitted claims 的 evidence entailment；
+- 不含 future/reference leakage；
+- 可用时的 local state-effect verification。
 
-Independently, compute provenance flow $\rho_{i,j}\in[0,1]$ by routing normalized mass backward from verified milestones and the terminal output through source-to-use paths. A segment with no path to any verified milestone receives $\rho=0$ in the primary version. Infrastructure tokens are protected separately by a small schema anchor.
+独立地，计算 provenance flow $\rho_{i,j}\in[0,1]$：从 verified milestones 和 terminal output 出发，沿 source-to-use paths 向后路由 normalized mass。primary version 中，没有通向任何 verified milestone 的 segment 得到 $\rho=0$。Infrastructure tokens 由一个小的 schema anchor 单独保护。
 
-This factorization distinguishes two questions:
+这种分解区分两个问题：
 
-- **Was the action supported by information available at the time?** $g$
-- **Did the logged evidence suggest that it improved the eventual outcome?** $[L,U]$
+- **该 action 是否由当时可用信息支持？** $g$
+- **logged evidence 是否表明它改善了最终结果？** $[L,U]$
 
-### 3.9 Step 7: compile credit into SFT and preference targets
+### 3.9 Step 7: 将 credit 编译为 SFT 与 preference targets
 
-For a reliably positive segment,
+对可靠正向 segment：
 
 $$
 w_{i,j}=\min(c_{\max},\max(0,L_{i,j}))\,g_{i,j}\rho_{i,j},
 $$
 
-where $c_{\max}$ is the 95th percentile of positive lower bounds on the training split. Normalize or cap total weight per trajectory so long traces do not dominate.
+其中 $c_{\max}$ 是 training split 上 positive lower bounds 的 95th percentile。对每条 trajectory 的总权重做 normalize 或 cap，避免长轨迹主导。
 
-For a reliably negative segment $z^-$, create a preference pair only if the same support cell contains a grounded positive alternative $z^+$. Pair construction is allowed only when both alternatives came from the exact same restorable state, or when a verified schema can render both under one canonical prompt. Semantic similarity alone is not enough to make a valid DPO pair.
+对可靠负向 segment $z^-$，只有当同一 support cell 中存在 grounded positive alternative $z^+$ 时，才创建 preference pair。Pair construction 只在两种情况下允许：两个 alternatives 来自完全相同的 restorable state，或 verified schema 能在同一个 canonical prompt 下渲染两者。仅有 semantic similarity 不足以构成有效 DPO pair。
 
-The pair loss is
+Pair loss 为
 
 $$
 \mathcal L_{\mathrm{pair}}=-\log\sigma\left(
@@ -411,9 +411,9 @@ $$
 \right]\right).
 $$
 
-Do not synthesize a “better” action solely from a judge for the primary experiment. If no observed positive alternative exists, mask the negative segment instead of applying unlikelihood training.
+primary experiment 中，不要仅凭 judge 合成一个“更好” action。如果没有 observed positive alternative，就 mask 负向 segment，而不是使用 unlikelihood training。
 
-The complete objective is
+完整目标为
 
 $$
 \mathcal L_{\mathrm{CPCD}}=
@@ -422,9 +422,9 @@ $$
 +\lambda_{\mathrm{schema}}\mathcal L_{\mathrm{schema}}.
 $$
 
-Use $\lambda_{\mathrm{schema}}=0.05$ as an initial anchor on formatting, tool schema, and mandatory control tokens; tune it in $\{0,0.05,0.1\}$. Positive but ungrounded/privileged segments and ambiguous segments stay in the input context but receive no semantic target loss.
+使用 $\lambda_{\mathrm{schema}}=0.05$ 作为 formatting、tool schema 与 mandatory control tokens 的初始 anchor；在 $\{0,0.05,0.1\}$ 中调参。正向但 ungrounded/privileged segments 与 ambiguous segments 保留在输入 context 中，但不获得 semantic target loss。
 
-### 3.10 Algorithm sketch
+### 3.10 算法草图
 
 ```text
 Input: frozen logs D, terminal outcomes, tool metadata
@@ -449,302 +449,302 @@ Input: frozen logs D, terminal outcomes, tool metadata
 7. At evaluation, discard all credit models and run the policy normally.
 ```
 
-### 3.11 What can be guaranteed
+### 3.11 能保证什么
 
-If the simultaneous intervals are valid at family-wise level $\alpha$, and an update is made only when an interval excludes zero, then conditional on the causal assumptions:
+如果 simultaneous intervals 在 family-wise level $\alpha$ 下有效，并且只在 interval 排除 0 时更新，那么在因果假设成立的条件下：
 
 $$
 \Pr(\text{any selected segment has the wrong true sign})\le \alpha.
 $$
 
-This is a conservative **sign-selection guarantee**, not a guarantee of exact causal-effect recovery or downstream policy improvement. It fails if the support representation omits important confounders, semantic action classes are inconsistent, or the interval procedure is miscalibrated.
+这是一个保守的 **sign-selection guarantee**，不是精确 causal-effect recovery 或 downstream policy improvement 的保证。如果 support representation 遗漏重要 confounders、semantic action classes 不一致，或 interval procedure 未校准，这个保证会失效。
 
-### 3.12 Practical MVP and full version
+### 3.12 Practical MVP 与 full version
 
-#### CPCD-Lite: first paper-quality pilot
+#### CPCD-Lite: 第一篇 paper-quality pilot
 
-- Use deterministic tool/memory provenance only.
-- Use hand-specified action classes for ALFWorld/WebShop or tau-bench.
-- Require exact task/milestone support cells.
-- Fit cross-fitted logistic propensity and outcome models.
-- Use task bootstrap intervals and overlap abstention.
-- Train positive weighted SFT; add DPO only after positive-credit calibration succeeds.
+- 只使用 deterministic tool/memory provenance。
+- 为 ALFWorld/WebShop 或 tau-bench 使用 hand-specified action classes。
+- 要求 exact task/milestone support cells。
+- 拟合 cross-fitted logistic propensity 与 outcome models。
+- 使用 task bootstrap intervals 与 overlap abstention。
+- 训练 positive weighted SFT；只有在 positive-credit calibration 成功后再加入 DPO。
 
-This version tests the central claim without depending on a learned graph encoder or a large LLM judge.
+这个版本可以测试核心 claim，而不依赖 learned graph encoder 或大型 LLM judge。
 
 #### CPCD-Full: long-horizon extension
 
-- Add prefix-only semantic provenance extraction.
-- Learn state/action embeddings with task-clustered cross-fitting.
-- Add hidden-confounding sensitivity intervals.
-- Include memory write/retrieve/update and evidence source/use episodes.
-- Add observed-pair negative preference training.
-- Scale to SWE and frozen-corpus deep research.
+- 加入 prefix-only semantic provenance extraction。
+- 使用 task-clustered cross-fitting 学习 state/action embeddings。
+- 加入 hidden-confounding sensitivity intervals。
+- 包含 memory write/retrieve/update 与 evidence source/use episodes。
+- 加入 observed-pair negative preference training。
+- 扩展到 SWE 与 frozen-corpus deep research。
 
-### 3.13 Expected failure modes and built-in responses
+### 3.13 预期 failure modes 与内置响应
 
 | Failure mode | Diagnostic | Response |
 |---|---|---|
-| Only one action per state | Low propensity/ESS | Abstain; collect a more diverse log set before claiming offline CA |
-| State abstraction merges incompatible histories | High within-class next-state disagreement | Split class or make interval vacuous |
-| Teacher-only hidden information | Credit collapses under policy-ID or $\Gamma$ sensitivity | Exclude privileged traces or report privileged variant separately |
-| Provenance extractor uses future evidence | Prefix-leakage audit | Reject edge and rerun labels |
-| Long success traces dominate | Per-task gradient mass imbalance | Cap and normalize loss mass by trajectory |
-| Negative credit has no better action | No supported positive pair | Mask only; do not hallucinate a preference target |
-| Policy leaves logged support after tuning | OOD action/state rate rises | Stronger SFT anchor, conservative decoding, or iterative data collection as a separate semi-online extension |
+| 每个 state 只有一个 action | Low propensity/ESS | Abstain；在声称 offline CA 前收集更多样的 log set |
+| State abstraction 合并了不兼容 histories | High within-class next-state disagreement | 拆分 class 或让 interval vacuous |
+| Teacher-only hidden information | Credit 在 policy-ID 或 $\Gamma$ sensitivity 下崩溃 | 排除 privileged traces，或单独报告 privileged variant |
+| Provenance extractor 使用未来证据 | Prefix-leakage audit | 拒绝 edge 并重新标注 |
+| 长成功轨迹主导 | Per-task gradient mass imbalance | 按 trajectory cap 与 normalize loss mass |
+| Negative credit 没有更好 action | No supported positive pair | 只 mask；不要 hallucinate preference target |
+| Tuning 后 policy 离开 logged support | OOD action/state rate rises | 更强 SFT anchor、保守 decoding，或把 iterative data collection 作为独立 semi-online extension |
 
 ---
 
-## 4. Experimental plan
+## 4. 实验计划
 
 ### 4.1 Research questions
 
-1. **RQ1: credit validity.** Do offline intervals predict the sign and ranking of evaluation-only intervention effects?
-2. **RQ2: policy value.** Does certified selective training improve task success at matched data, token, and compute budgets?
-3. **RQ3: long-horizon value.** Does provenance matter more for long source-to-use distances, memory operations, and trajectories beyond 50 or 100 turns?
-4. **RQ4: failure reuse.** Are useful segments from failed traces responsible for OOD/hard-task gains?
-5. **RQ5: conservatism.** What precision/coverage trade-off is obtained as overlap, confidence, and $\Gamma$ thresholds change?
+1. **RQ1: credit validity.** Offline intervals 能否预测 evaluation-only intervention effects 的符号与排序？
+2. **RQ2: policy value.** 在相同 data、token 与 compute budgets 下，certified selective training 是否提升 task success？
+3. **RQ3: long-horizon value.** 对 source-to-use distance 长、memory operations 多、超过 50 或 100 turns 的 trajectories，provenance 是否更重要？
+4. **RQ4: failure reuse.** 从 failed traces 中提取的有用 segments 是否负责 OOD/hard-task gains？
+5. **RQ5: conservatism.** 随着 overlap、confidence 与 $\Gamma$ thresholds 变化，precision/coverage trade-off 如何？
 
 ### 4.2 Benchmark stack
 
-Use a staged stack; do not start with the most expensive SWE setting before proving that the credit labels mean anything.
+使用分阶段 stack；在证明 credit labels 有意义之前，不要从最昂贵的 SWE 设定开始。
 
-| Stage | Domain and split | Why it is needed | Proposed frozen log construction | Primary evaluation |
+| 阶段 | 领域与 split | 为什么需要 | Proposed frozen log construction | Primary evaluation |
 |---|---|---|---|---|
-| A: controlled attribution | ALFWorld + WebShop | Restorable states and multiple alternatives make intervention credit measurable | 16-32 trajectories per training task from several checkpoints/temperatures, then freeze | Success; intervention sign/precision on held-out branch points |
-| B: structured tool agent | tau-bench retail, then tau2-bench | Realistic tool schemas, business state, mixed recoveries, medium horizons | 8-16 trajectories per task from base/SFT/teacher mixtures | Task accuracy, policy violations, turns, credit risk-coverage |
-| C: true long horizon | SWE-Gym logs -> SWE-bench Verified | Repository state, delayed edit/test effects, 50-100+ turn traces | 4-8 diverse trajectories per issue where affordable; pool only audited semantic cells | Pass@1, cost, turns, tests passed, horizon-stratified credit |
-| D: optional deep research | OpenResearcher-style frozen corpus -> BrowseComp-Plus/GAIA | Evidence provenance, citations, bounded context, 100+ calls | Frozen search corpus and source-indexed logs; no live-web dependence | Answer accuracy, citation support, source-to-use distance |
+| A: controlled attribution | ALFWorld + WebShop | Restorable states 与多个 alternatives 让 intervention credit 可测 | 每个 training task 从多个 checkpoints/temperatures 采样 16-32 条 trajectories，然后 freeze | Success；held-out branch points 上的 intervention sign/precision |
+| B: structured tool agent | tau-bench retail，然后 tau2-bench | 真实 tool schemas、business state、mixed recoveries、中等 horizon | 每个 task 从 base/SFT/teacher mixtures 采样 8-16 条 trajectories | Task accuracy、policy violations、turns、credit risk-coverage |
+| C: true long horizon | SWE-Gym logs -> SWE-bench Verified | Repository state、延迟 edit/test effects、50-100+ turn traces | 成本允许时每个 issue 4-8 条多样 trajectories；只 pool 经过 audit 的 semantic cells | Pass@1、cost、turns、tests passed、horizon-stratified credit |
+| D: optional deep research | OpenResearcher-style frozen corpus -> BrowseComp-Plus/GAIA | Evidence provenance、citations、bounded context、100+ calls | Frozen search corpus 与 source-indexed logs；不依赖 live web | Answer accuracy、citation support、source-to-use distance |
 
-Use task-level splits for household/web/customer-service tasks and repository-level splits for SWE. Near-duplicate tasks, issue variants, and trajectories from the same environment seed must remain in one split.
+家庭/网页/客服任务使用 task-level splits；SWE 使用 repository-level splits。Near-duplicate tasks、issue variants 与来自同一 environment seed 的 trajectories 必须留在同一个 split。
 
 ### 4.3 Offline log design
 
-The quality of the study depends more on behavior diversity than raw trajectory count. Construct the frozen corpus from:
+研究质量更依赖 behavior diversity，而不是原始 trajectory 数量。冻结 corpus 应来自：
 
-- the base model, an SFT checkpoint, and at least one stronger teacher;
-- two or three sampling temperatures;
-- successful, failed, and recovered trajectories;
-- explicit policy/checkpoint identifiers and, where possible, action log-probabilities.
+- base model、一个 SFT checkpoint，以及至少一个更强 teacher；
+- 两到三个 sampling temperatures；
+- successful、failed 与 recovered trajectories；
+- 显式 policy/checkpoint identifiers，并在可能时记录 action log-probabilities。
 
-Freeze the logs before fitting any credit model. The primary CPCD training run makes no environment calls. State restoration and branching are confined to the held-out credit-evaluation set.
+在拟合任何 credit model 前冻结 logs。Primary CPCD training run 不进行环境调用。State restoration 与 branching 仅限 held-out credit-evaluation set。
 
-Evaluate four data regimes independently:
+分别评估四种数据设定：
 
-1. expert successes only;
-2. mixed expert successes and failures;
-3. heterogeneous base/SFT/teacher logs;
-4. cross-policy transfer, where one behavior source is held out from credit estimation.
+1. 只有 expert successes；
+2. mixed expert successes and failures；
+3. heterogeneous base/SFT/teacher logs；
+4. cross-policy transfer，即从 credit estimation 中 held out 一个 behavior source。
 
 ### 4.4 Baselines
 
-#### Strict-offline and SFT baselines
+#### Strict-offline 与 SFT baselines
 
-| Baseline | Question it controls |
+| Baseline | 控制的问题 |
 |---|---|
-| Full-trajectory SFT | Does any selection beat standard imitation? |
-| Success-only RFT/SFT | Is using failed data actually useful? |
-| Reward-weighted SFT | Is within-trajectory credit better than trajectory weighting? |
-| Same-token random mask | Are gains merely regularization or fewer supervised tokens? |
-| Perplexity/entropy mask | Is causal structure better than model uncertainty? |
-| Explicit tool-error mask / SWE-Lego recipe | Does CPCD improve beyond obvious error removal? |
-| ATLaS-style critical-step selector | Is outcome-supported credit better than LLM-perceived importance? |
-| STeP/EEF-style masks or segment mining | Does calibrated signed credit beat heuristic reflection/failure reuse? |
-| AWR or Q-SFT | Does interval selection beat scalar value weighting? |
-| HPL | Is provenance-aware support better than multi-scale preference alone? |
-| Agentic-DPO | Does using outcomes, failures, and abstention beat expert-state one-step preferences? |
+| Full-trajectory SFT | 任意 selection 是否能超过标准 imitation？ |
+| Success-only RFT/SFT | 使用 failed data 是否真的有用？ |
+| Reward-weighted SFT | within-trajectory credit 是否优于 trajectory weighting？ |
+| Same-token random mask | 收益是否只是 regularization 或 supervised tokens 变少？ |
+| Perplexity/entropy mask | causal structure 是否优于 model uncertainty？ |
+| Explicit tool-error mask / SWE-Lego recipe | CPCD 是否超过显而易见的 error removal？ |
+| ATLaS-style critical-step selector | outcome-supported credit 是否优于 LLM-perceived importance？ |
+| STeP/EEF-style masks or segment mining | calibrated signed credit 是否优于 heuristic reflection/failure reuse？ |
+| AWR or Q-SFT | interval selection 是否优于 scalar value weighting？ |
+| HPL | provenance-aware support 是否优于单纯 multi-scale preference？ |
+| Agentic-DPO | 使用 outcomes、failures 与 abstention 是否优于 expert-state one-step preferences？ |
 
-#### Upper bounds and diagnostic controls
+#### Upper bounds 与 diagnostic controls
 
-- evaluation-only Monte Carlo branch credit, following the IPR/CSO idea;
-- an oracle mask derived from branch effects;
-- P2T on SWE when reference patches and tests are available;
-- flat-history doubly robust estimation without provenance;
-- DML-IL-inspired history representation where an implementable instrument exists.
+- 遵循 IPR/CSO 思路的 evaluation-only Monte Carlo branch credit；
+- 从 branch effects 得到的 oracle mask；
+- 当 reference patches 与 tests 可用时，在 SWE 上使用 P2T；
+- 不使用 provenance 的 flat-history doubly robust estimation；
+- 在存在可实现 instrument 时使用 DML-IL-inspired history representation。
 
-The semi-online methods are upper bounds, not apples-to-apples offline baselines.
+Semi-online methods 是 upper bounds，不是严格 apples-to-apples offline baselines。
 
-### 4.5 Direct credit evaluation
+### 4.5 直接 credit evaluation
 
-For 300-500 held-out branch points per domain:
+对每个领域 300-500 个 held-out branch points：
 
-1. restore the environment immediately before a segment;
-2. execute the logged semantic action and one or more observed alternative classes;
-3. continue with the same fixed continuation policy for $K=16$ stochastic rollouts;
-4. estimate the intervention contrast $\Delta^{\mathrm{branch}}$ and its uncertainty;
-5. never feed these branch outcomes back into the offline credit estimator.
+1. 在 segment 之前恢复环境；
+2. 执行 logged semantic action 和一个或多个 observed alternative classes；
+3. 使用同一个 fixed continuation policy 继续 $K=16$ 次 stochastic rollouts；
+4. 估计 intervention contrast $\Delta^{\mathrm{branch}}$ 及其 uncertainty；
+5. 绝不把这些 branch outcomes 回灌给 offline credit estimator。
 
-This measures the same natural-continuation estimand used by CPCD. In SWE, restore a container snapshot and branch only at actions whose state effects can be replayed. In deep research, use a frozen document corpus to avoid live-web non-stationarity.
+这测量的是 CPCD 使用的同一个 natural-continuation estimand。在 SWE 中，恢复 container snapshot，并且只在 state effects 可 replay 的 actions 上 branch。在 deep research 中，使用 frozen document corpus 避免 live-web non-stationarity。
 
-Primary credit metrics:
+主要 credit metrics：
 
-- sign precision and recall for positive and negative credit;
-- causal precision at 10%, 30%, and 50% coverage;
-- area under the risk-coverage curve;
-- Spearman correlation with branch-effect magnitude;
-- interval coverage and average interval width;
-- false reward of harmful steps in successful traces;
-- false suppression of helpful steps in failed traces;
-- metrics stratified by trajectory length and source-to-use distance.
+- positive 与 negative credit 的 sign precision and recall；
+- 10%、30%、50% coverage 下的 causal precision；
+- area under the risk-coverage curve；
+- 与 branch-effect magnitude 的 Spearman correlation；
+- interval coverage 与 average interval width；
+- successful traces 中 harmful steps 被错误奖励的比例；
+- failed traces 中 helpful steps 被错误抑制的比例；
+- 按 trajectory length 与 source-to-use distance 分层的 metrics。
 
-The main endpoint should be **precision at a pre-registered useful coverage**, not accuracy on a dataset dominated by ambiguous steps.
+主 endpoint 应是**预注册 useful coverage 下的 precision**，而不是在 ambiguous steps 占多数的数据集上报告 accuracy。
 
 ### 4.6 Downstream policy evaluation
 
-Report:
+报告：
 
-- Success@1 / Pass@1 and, secondarily, Pass@k;
-- turns, generated tokens, tool calls, wall time, and dollar-equivalent environment cost;
-- invalid action/schema rate and safety/policy violations;
-- hard-task and OOD generalization;
-- performance in horizon bins `<20`, `20-50`, `50-100`, and `>100` turns;
-- supervised-token fraction and effective gradient mass per task;
-- post-training state/action OOD rate relative to the frozen corpus.
+- Success@1 / Pass@1，以及次要的 Pass@k；
+- turns、generated tokens、tool calls、wall time 与 dollar-equivalent environment cost；
+- invalid action/schema rate 与 safety/policy violations；
+- hard-task 与 OOD generalization；
+- horizon bins `<20`、`20-50`、`50-100`、`>100` turns 上的表现；
+- supervised-token fraction 与每个 task 的 effective gradient mass；
+- post-training state/action OOD rate relative to the frozen corpus。
 
-Use equal raw tasks, equal supervised action-token count, and equal optimizer FLOPs as three separate comparisons. A selective method should not receive credit for simply training on fewer tokens or taking fewer optimizer steps.
+分别使用 equal raw tasks、equal supervised action-token count、equal optimizer FLOPs 三种比较。Selective method 不应因为训练 token 更少或 optimizer steps 更少而得到不公平 credit。
 
-### 4.7 Critical ablations
+### 4.7 关键 ablations
 
 #### Attribution structure
 
-- remove provenance and use flat turn-recency/history features;
-- randomly permute provenance edges while preserving node degree;
-- use turn, fixed-length segment, and semantic-segment units;
-- remove memory write/retrieve/update nodes;
-- use deterministic edges only vs deterministic plus semantic edges.
+- 移除 provenance，只使用 flat turn-recency/history features；
+- 随机置换 provenance edges，同时保持 node degree；
+- 使用 turn、fixed-length segment 与 semantic-segment units；
+- 移除 memory write/retrieve/update nodes；
+- 只用 deterministic edges vs deterministic plus semantic edges。
 
 #### Identification and uncertainty
 
-- point estimate without intervals;
-- no cross-fitting;
-- no propensity model;
-- no outcome model;
-- no overlap/ESS gate;
-- $\Gamma\in\{1,1.25,1.5,2\}$;
-- exact cells vs learned semantic matching;
-- same-policy vs mixed-policy logs.
+- 没有 intervals 的 point estimate；
+- no cross-fitting；
+- no propensity model；
+- no outcome model；
+- no overlap/ESS gate；
+- $\Gamma\in\{1,1.25,1.5,2\}$；
+- exact cells vs learned semantic matching；
+- same-policy vs mixed-policy logs。
 
 #### Training compiler
 
-- positive SFT only;
-- negative DPO only;
-- no groundedness gate;
-- no provenance-flow weight;
-- no schema anchor;
-- no trajectory mass cap;
-- replace lower bound $L$ with point estimate $\hat\Delta$;
-- permute $L$ within each task while preserving its histogram and total loss mass.
+- positive SFT only；
+- negative DPO only；
+- no groundedness gate；
+- no provenance-flow weight；
+- no schema anchor；
+- no trajectory mass cap；
+- 用 point estimate $\hat\Delta$ 替代 lower bound $L$；
+- 在每个 task 内置换 $L$，同时保持其 histogram 与 total loss mass。
 
-The last permutation is the load-bearing falsifier: if performance remains unchanged, the estimated credit values are not doing useful work.
+最后一个 permutation 是关键 falsifier：如果性能不变，说明 estimated credit values 没有发挥有效作用。
 
-### 4.8 Leakage and judge controls
+### 4.8 Leakage 与 judge controls
 
-- Credit-model inputs end at the segment prefix; future observations and references are inaccessible.
-- Reference patches/answers are used only in named privileged baselines or held-out evaluation.
-- Any semantic extractor is frozen before policy training and audited on human-labeled edges.
-- Credit-estimator folds, policy-training tasks, and final evaluation tasks are disjoint.
-- Calibrate judge/groundedness labels on a stratified human sample, including successes with regressions and failures with good prefixes.
-- Report inter-annotator agreement and judge false-positive rates.
-- Record all behavior-policy IDs to test whether “teacher identity” is acting as a hidden success label.
+- Credit-model inputs 截止到 segment prefix；未来 observations 与 references 不可访问。
+- Reference patches/answers 只用于明确命名的 privileged baselines 或 held-out evaluation。
+- 任意 semantic extractor 在 policy training 前冻结，并在人类标注 edges 上 audit。
+- Credit-estimator folds、policy-training tasks 与 final evaluation tasks 互不重叠。
+- 在 stratified human sample 上校准 judge/groundedness labels，样本包括 successes with regressions 与 failures with good prefixes。
+- 报告 inter-annotator agreement 与 judge false-positive rates。
+- 记录所有 behavior-policy IDs，以测试“teacher identity”是否充当 hidden success label。
 
 ### 4.9 Statistical protocol
 
-- Use at least three policy-training seeds.
-- Treat task, not segment, as the independent unit.
-- Report paired task-bootstrap 95% confidence intervals for success differences.
-- Use cluster bootstrap for credit metrics and correct the small set of co-primary domain comparisons.
-- Pre-register two co-primary endpoints: causal precision at 30% coverage and Success@1 at equal supervised-token budget.
-- Determine final sample size from the variance observed in a 10% pilot; do not power the study using correlated segment counts.
+- 至少使用三个 policy-training seeds。
+- 以 task 而不是 segment 作为 independent unit。
+- 对 success differences 报告 paired task-bootstrap 95% confidence intervals。
+- 对 credit metrics 使用 cluster bootstrap，并校正少量 co-primary domain comparisons。
+- 预注册两个 co-primary endpoints：30% coverage 下的 causal precision，以及 equal supervised-token budget 下的 Success@1。
+- 根据 10% pilot 中观察到的 variance 决定最终 sample size；不要用 correlated segment counts 做 power calculation。
 
 ### 4.10 Resource plan
 
-These are planning bounds, not performance claims:
+以下是 planning bounds，不是 performance claims：
 
 | Scope | Models/domains | Approximate budget |
 |---|---|---|
-| MVP | One 4B model, ALFWorld/WebShop, CPCD-Lite, 3 seeds | 12-20 H100-equivalent GPU-days plus branch-evaluation environment time |
-| Main study | 4B and 8B, controlled + tau-bench + SWE, full ablations | 60-90 H100-equivalent GPU-days |
-| Semantic annotation | Prefix-only edge/grounding extraction and human audit | Cap paid-model usage near USD 4K; replace with open model where quality is adequate |
+| MVP | 一个 4B model，ALFWorld/WebShop，CPCD-Lite，3 seeds | 12-20 H100-equivalent GPU-days 加 branch-evaluation environment time |
+| Main study | 4B 与 8B，controlled + tau-bench + SWE，full ablations | 60-90 H100-equivalent GPU-days |
+| Semantic annotation | Prefix-only edge/grounding extraction 与 human audit | paid-model usage 控制在约 USD 4K；质量足够时替换为 open model |
 
-Benchmark throughput and label cost on 5% of the data before committing to the full study. The dominant costs are likely branch-based evaluation and long-context SWE fine-tuning, not the doubly robust estimator.
+在投入完整研究前，先用 5% 数据 benchmark throughput 与 label cost。主要成本很可能是 branch-based evaluation 和 long-context SWE fine-tuning，而不是 doubly robust estimator。
 
-### 4.11 Success and kill criteria
+### 4.11 Success 与 kill criteria
 
-#### Evidence supporting the idea
+#### 支持该 idea 的证据
 
-- at least 80% positive-sign precision at 30% coverage on controlled interventions;
-- a reproducible Success@1 gain of at least 3 absolute points over full SFT and same-token random masking on two domains;
-- a larger provenance ablation gap in the `>50`-turn or long source-to-use bucket;
-- positive value from failed-trace segments after matching token and compute budgets;
-- graceful precision/coverage behavior as $\Gamma$ increases.
+- controlled interventions 上，在 30% coverage 下 positive-sign precision 至少 80%；
+- 在两个 domains 上，相比 full SFT 和 same-token random masking，Success@1 可复现提升至少 3 absolute points；
+- 在 `>50`-turn 或 long source-to-use bucket 中，provenance ablation gap 更大；
+- 在匹配 token 与 compute budgets 后，failed-trace segments 仍有正向价值；
+- 随着 $\Gamma$ 增大，precision/coverage 行为平滑退化。
 
-#### Results that should stop or substantially revise the project
+#### 应停止或大幅修改项目的结果
 
-- fewer than 10% of segments have non-vacuous intervals after reasonable pooling;
-- the equal-mass permuted-credit mask matches CPCD;
-- flat-history estimation matches provenance on long-delay examples;
-- gains disappear under equal supervised-token or equal-FLOP controls;
-- credit precision collapses under $\Gamma=1.25$;
-- Agentic-DPO or explicit tool-error masking matches CPCD across all domains;
-- improvements occur only when future/reference information leaks into labels;
-- no benefit appears in trajectories beyond 50 turns.
+- 合理 pooling 后，少于 10% segments 有 non-vacuous intervals；
+- equal-mass permuted-credit mask 与 CPCD 持平；
+- flat-history estimation 在 long-delay examples 上与 provenance 持平；
+- equal supervised-token 或 equal-FLOP controls 下收益消失；
+- credit precision 在 $\Gamma=1.25$ 下崩溃；
+- Agentic-DPO 或 explicit tool-error masking 在所有 domains 上与 CPCD 持平；
+- 改进只在 labels 泄漏 future/reference information 时出现；
+- 超过 50 turns 的 trajectories 中没有收益。
 
-These criteria make the work informative even if the proposed method fails: the resulting evidence would show whether fixed logs contain enough overlap to support long-horizon signed credit at all.
+这些标准能让工作即使失败也有信息量：结果会说明 fixed logs 是否包含足够 overlap，从而支持 long-horizon signed credit。
 
 ---
 
-## 5. Recommended research shape
+## 5. 推荐研究形态
 
 ### 5.1 Primary paper claim
 
-A defensible claim would be:
+一个 defensible claim 是：
 
-> Long-horizon offline agent credit should be treated as conservative sign identification rather than dense score prediction. Provenance-defined semantic segments plus support-aware intervals can selectively compile frozen logs into SFT and preference targets, improving both intervention-level credit precision and downstream policy learning.
+> Long-horizon offline agent credit 应被视为 conservative sign identification，而不是 dense score prediction。Provenance-defined semantic segments 与 support-aware intervals 可以把 frozen logs 选择性编译为 SFT 和 preference targets，同时提升 intervention-level credit precision 与 downstream policy learning。
 
-Avoid the stronger claim that CPCD recovers the true causal contribution of every step.
+避免更强的说法，即 CPCD 恢复了每一步的真实 causal contribution。
 
 ### 5.2 Minimum publishable contribution
 
-The smallest coherent paper has three pieces:
+最小 coherent paper 包含三部分：
 
-1. a benchmark protocol with intervention-derived credit signs and risk-coverage metrics;
-2. CPCD-Lite with overlap-aware interval abstention and context/target separation;
-3. controlled evidence that the credit signal, not token reduction, causes the policy gain.
+1. 一个带 intervention-derived credit signs 和 risk-coverage metrics 的 benchmark protocol；
+2. CPCD-Lite，包含 overlap-aware interval abstention 与 context/target separation；
+3. controlled evidence，证明带来 policy gain 的是 credit signal，而不是 token reduction。
 
-The learned semantic graph, memory operations, SWE scaling, and negative DPO can be added only after this core survives falsification.
+Learned semantic graph、memory operations、SWE scaling 和 negative DPO 应在这个核心通过 falsification 后再加入。
 
-### 5.3 Main novelty risks
+### 5.3 主要 novelty risks
 
-- **P2T overlap:** process graphs and grounded segment selection are already demonstrated with privileged SWE patches. The distinction must be fixed-log observational variation, signed intervals, and abstention.
-- **Agentic-DPO overlap:** state-conditioned offline preference learning is already a strong baseline. The distinction must come from failures, delayed provenance, and supported negative/ambiguous cases.
-- **ATLaS overlap:** merely replacing a selector prompt with a score model is insufficient. Direct intervention calibration is necessary.
-- **DML-IL overlap:** generic doubly robust or instrumental-variable imitation learning is not new. The contribution must be the long-horizon semantic treatment definition, compiler, and empirical causal-credit benchmark.
-- **Fast-moving 2026 literature:** rerun a primary-source and OpenReview search immediately before claiming novelty or submission.
+- **P2T overlap:** process graphs 与 grounded segment selection 已经通过 privileged SWE patches 展示过。区别必须是 fixed-log observational variation、signed intervals 与 abstention。
+- **Agentic-DPO overlap:** state-conditioned offline preference learning 已经是强 baseline。区别必须来自 failures、delayed provenance 与 supported negative/ambiguous cases。
+- **ATLaS overlap:** 仅把 selector prompt 换成 score model 不够。必须做直接 intervention calibration。
+- **DML-IL overlap:** 通用 doubly robust 或 instrumental-variable imitation learning 不是新的。贡献必须是 long-horizon semantic treatment definition、compiler 与 empirical causal-credit benchmark。
+- **快速变化的 2026 文献:** 在声称 novelty 或投稿前，必须重新做 primary-source 与 OpenReview 搜索。
 
 ### 5.4 Implementation order
 
-1. Freeze a multi-policy ALFWorld/WebShop log set and define restorable branch points.
-2. Implement deterministic segmentation, support cells, and branch-effect evaluation.
-3. Run full SFT, random mask, ATLaS-style mask, and CPCD-Lite before building a semantic graph model.
-4. Add failure traces and test whether positive credit can recover useful prefixes.
-5. Move to tau-bench only if intervention precision is calibrated.
-6. Add provenance and long-delay buckets.
-7. Add SWE and observed-pair DPO last.
+1. 冻结一个 multi-policy ALFWorld/WebShop log set，并定义 restorable branch points。
+2. 实现 deterministic segmentation、support cells 与 branch-effect evaluation。
+3. 在构建 semantic graph model 前，先跑 full SFT、random mask、ATLaS-style mask 与 CPCD-Lite。
+4. 加入 failure traces，测试 positive credit 能否恢复有用 prefixes。
+5. 只有 intervention precision 校准后，再迁移到 tau-bench。
+6. 加入 provenance 与 long-delay buckets。
+7. 最后加入 SWE 与 observed-pair DPO。
 
 ---
 
-## 6. Literature-search notes
+## 6. 文献检索说明
 
-The focused search used combinations of `offline trajectory`, `selective SFT`, `critical step`, `expert failure`, `hindsight relabeling`, `state-conditioned preference`, `privileged process supervision`, and `long-horizon agent` over 2024-2026. arXiv, OpenAlex, and Semantic Scholar returned a useful candidate set, followed by primary arXiv-page verification. The unified search experienced repeated rate limits and OpenReview could not be exhaustively queried in this environment, so this memo is a focused research review rather than a formal systematic review. Numerical gains reported by individual papers are not compared as a leaderboard.
+本次 focused search 使用了 `offline trajectory`、`selective SFT`、`critical step`、`expert failure`、`hindsight relabeling`、`state-conditioned preference`、`privileged process supervision` 与 `long-horizon agent` 等组合，覆盖 2024-2026 年。检索源包括 arXiv、OpenAlex 与 Semantic Scholar，并随后用 primary arXiv page 做验证。统一搜索过程中多次遇到 rate limit，且本环境无法穷尽查询 OpenReview，因此本文是 focused research review，而不是 formal systematic review。各论文报告的数值收益不应当作 leaderboard 横向比较。
 
-### Suggested reading order
+### 建议阅读顺序
 
-1. [ATLaS](https://arxiv.org/abs/2503.02197): cleanest selective-SFT formulation.
-2. [STeP](https://arxiv.org/abs/2505.20023) and [EEF](https://arxiv.org/abs/2504.13145): context/target separation and useful failure fragments.
-3. [Q-SFT](https://arxiv.org/abs/2411.05193) and [AWR](https://arxiv.org/abs/1910.00177): value-weighted likelihood foundations.
-4. [HPL](https://arxiv.org/abs/2510.03253) and [Agentic-DPO](https://arxiv.org/abs/2607.10601): offline preference learning at group and state granularity.
-5. [SWE-Lego](https://arxiv.org/abs/2601.01426) and [P2T](https://arxiv.org/abs/2605.21996): realistic long-horizon SWE SFT and privileged process curation.
-6. [HSL](https://arxiv.org/abs/2607.04235) and [AgentHER](https://arxiv.org/abs/2603.21357): hindsight use of unintended or failed outcomes.
-7. [DML-IL](https://arxiv.org/abs/2502.07656): the causal-identification warning and theoretical foundation.
-8. [IPR](https://arxiv.org/abs/2406.11176) and [CSO](https://arxiv.org/abs/2602.03412): intervention-based upper bounds and evaluation design.
-9. [ECHO](https://arxiv.org/abs/2606.31650): long-delay memory provenance and credit routing.
+1. [ATLaS](https://arxiv.org/abs/2503.02197)：最清晰的 selective-SFT formulation。
+2. [STeP](https://arxiv.org/abs/2505.20023) 与 [EEF](https://arxiv.org/abs/2504.13145)：context/target separation 与 useful failure fragments。
+3. [Q-SFT](https://arxiv.org/abs/2411.05193) 与 [AWR](https://arxiv.org/abs/1910.00177)：value-weighted likelihood foundations。
+4. [HPL](https://arxiv.org/abs/2510.03253) 与 [Agentic-DPO](https://arxiv.org/abs/2607.10601)：group 与 state 粒度的 offline preference learning。
+5. [SWE-Lego](https://arxiv.org/abs/2601.01426) 与 [P2T](https://arxiv.org/abs/2605.21996)：真实 long-horizon SWE SFT 与 privileged process curation。
+6. [HSL](https://arxiv.org/abs/2607.04235) 与 [AgentHER](https://arxiv.org/abs/2603.21357)：对 unintended 或 failed outcomes 的 hindsight use。
+7. [DML-IL](https://arxiv.org/abs/2502.07656)：causal-identification warning 与理论基础。
+8. [IPR](https://arxiv.org/abs/2406.11176) 与 [CSO](https://arxiv.org/abs/2602.03412)：intervention-based upper bounds 与 evaluation design。
+9. [ECHO](https://arxiv.org/abs/2606.31650)：long-delay memory provenance 与 credit routing。
