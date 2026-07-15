@@ -21,6 +21,7 @@ Survey: [arXiv:2604.09459](https://arxiv.org/abs/2604.09459).
 - [How CA changes model training](#how-credit-assignment-changes-model-training)
 - [Long-horizon frontier (2026-06/07)](#long-horizon-frontier-2026-0607)
 - [SFT/offline trajectory credit](#sftoffline-trajectory-credit-assignment)
+- [SFT/offline long-horizon research proposal](papers/sft_offline_long_horizon_credit_assignment.md)
 - [Featured (major labs)](#featured-major-labs)
 - [Recently added / gap-fill](#recently-added--gap-fill)
 - [Awesome cross-check](#awesome-cross-check) → [`papers/awesome_gap_fill.md`](papers/awesome_gap_fill.md)
@@ -89,6 +90,8 @@ The important differences are therefore **where the credit signal comes from**, 
 ### SFT/offline trajectory credit assignment
 
 These methods start from expert, synthetic, failed, or offline trajectories and change which tokens/steps receive imitation loss. They are useful when the available signal is an SFT dataset rather than fresh RL rollouts.
+
+For a focused discussion of motivation, identifiability, prior work, a concrete conservative offline method, and a falsifiable experiment plan, see [`papers/sft_offline_long_horizon_credit_assignment.md`](papers/sft_offline_long_horizon_credit_assignment.md).
 
 | Date | Method | Org | Base model | Train data | Eval data | Links | OSS | Credit signal / SFT target | How the model is trained | Extra requirements / main limitation |
 |------|--------|-----|------------|------------|-----------|-------|-----|----------------------------|--------------------------|--------------------------------------|

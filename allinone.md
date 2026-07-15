@@ -196,3 +196,33 @@ The run was interrupted after it failed to return structured records. Metadata a
 ### Mechanism notes
 
 SAO replaces group-wise GRPO sampling with one rollout per prompt so completed trajectories can be consumed immediately in asynchronous training. To control policy lag, it uses rollout log-probabilities as the behavior policy and masks tokens outside a double-sided importance-ratio trust region. Because single-rollout training loses group-relative baselines, it relies on a trained value model, faster critic updates than policy updates, frozen-attention value-model tuning, and skip-observation token-level GAE for agentic traces. The paper reports experiments on SWE-Bench Verified, AIME2025, BeyondAIME, HMMT Nov 2025, IMOAnswerBench, and simulated online writing, and states that SAO was deployed in the agentic RL pipeline for GLM-5.2.
+
+---
+
+## Focused SFT/offline long-horizon search (2026-07-15)
+
+Query family: `offline trajectory credit assignment supervised fine-tuning long-horizon LLM agents`, plus targeted queries for selective SFT, failure mining, hindsight relabeling, state-conditioned preference, causal imitation learning, and privileged SWE process supervision.
+
+Window: 2024-2026, with AWR retained as a classical foundation.
+
+The unified paper-search script queried arXiv, OpenAlex, Semantic Scholar, DBLP, and OpenReview. It recovered 23 candidates in the successful targeted run; the broader run entered repeated rate-limit backoff and DBLP returned HTTP 503. OpenReview credentials were unavailable. The ranked list below is based on topical relevance followed by primary arXiv-page verification, not citation count.
+
+| Rank | Work | Date | Relevance to fixed-log long-horizon credit | Primary source |
+|---:|---|---|---|---|
+| 1 | Agentic-DPO | 2026-07 | Strict-offline state-conditioned expert-vs-student action preference; no environment interaction during optimization | [2607.10601](https://arxiv.org/abs/2607.10601) |
+| 2 | P2T | 2026-05 | Reference-patch process graph, grounded step progress, and efficient SWE trajectory curation | [2605.21996](https://arxiv.org/abs/2605.21996) |
+| 3 | SWE-Lego | 2026-01 | Long-horizon SFT-only SWE baseline with tool-error masking and a turn curriculum | [2601.01426](https://arxiv.org/abs/2601.01426) |
+| 4 | HSL / Spinning Straw into Gold | 2026-07 | Hindsight achieved-goal relabeling, irrelevant-action masks, and sample weighting | [2607.04235](https://arxiv.org/abs/2607.04235) |
+| 5 | ATLaS | 2025-03 | Direct hard step-level selective SFT while preserving the full context | [2503.02197](https://arxiv.org/abs/2503.02197) |
+| 6 | HPL | 2025-10 | Offline trajectory/group/step preference learning for long-horizon agents | [2510.03253](https://arxiv.org/abs/2510.03253) |
+| 7 | STeP | 2025-05 | Error/reflection/correction trajectories with partial target masking | [2505.20023](https://arxiv.org/abs/2505.20023) |
+| 8 | EEF | 2025-04 | Recovers beneficial actions from failed expert trajectories | [2504.13145](https://arxiv.org/abs/2504.13145) |
+| 9 | Q-SFT | 2024-11 | Q-learning expressed as an SFT-like offline objective | [2411.05193](https://arxiv.org/abs/2411.05193) |
+| 10 | DML-IL | 2025-02 | Causal imitation learning with hidden confounding and trajectory histories | [2502.07656](https://arxiv.org/abs/2502.07656) |
+| 11 | AgentHER | 2026-03 | Failure classification and hindsight goal relabeling into SFT/DPO data | [2603.21357](https://arxiv.org/abs/2603.21357) |
+| 12 | ACC | 2026-05 | Compiles distant tool evidence into long-context supervised examples | [2605.21850](https://arxiv.org/abs/2605.21850) |
+| 13 | InT | 2026-01 | First-error intervention followed by localized SFT; reasoning rather than agentic | [2601.14209](https://arxiv.org/abs/2601.14209) |
+| 14 | IPR / Watch Every Step | 2024-06 | Monte Carlo step-value upper bound from expert-prefix rerollouts | [2406.11176](https://arxiv.org/abs/2406.11176) |
+| 15 | CSO | 2026-02 | Critical-step alternatives and branch verification; semi-online upper bound | [2602.03412](https://arxiv.org/abs/2602.03412) |
+
+The resulting synthesis and method proposal are in [`papers/sft_offline_long_horizon_credit_assignment.md`](papers/sft_offline_long_horizon_credit_assignment.md).
