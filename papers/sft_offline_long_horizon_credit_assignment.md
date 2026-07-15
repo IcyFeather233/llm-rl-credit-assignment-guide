@@ -1,333 +1,489 @@
-# 面向 Long-Horizon LLM Agent 的 SFT / Offline Credit Assignment
+# 面向长时程大语言模型智能体的 SFT / 离线信用归因
 
 > 研究备忘录与方法方案。文献检索截至 **2026-07-15**。
-> 范围：从一组**冻结的已记录轨迹**中学习更好的 agent policy，在 policy optimization 期间不进行环境交互。教师标注、参考答案和 replay 被视为独立设定，并在文中明确标注。
+> 范围：从一组**冻结的已记录轨迹**中学习更好的智能体策略，在策略优化期间不进行环境交互。教师标注、参考答案和环境重放属于额外设定，文中会明确区分。
 
 ## 执行摘要
 
-标准 agent SFT 会把 demonstration 中的每个 action token 都当作同等正确：
+标准的智能体 SFT 会把示范轨迹中的每个动作词元都当作同等正确：
 
 $$
 \mathcal L_{\mathrm{SFT}}
 =-\sum_i\sum_{t=1}^{T_i}\log \pi_\theta(a_{i,t}\mid h_{i,t}).
 $$
 
-这隐含了一个 credit assignment 规则：$w_{i,t}=1$。对长轨迹来说，这个规则尤其脆弱：成功轨迹中可能包含循环、缺乏证据的猜测、偶然的工具调用，或者很久之后才被修复的错误；失败轨迹中也可能包含正确计划、有用证据和若干已经完成的子目标。全轨迹 SFT 会强化前者，并丢弃或惩罚后者。
+这相当于默认每一步的训练权重都是 $w_{i,t}=1$。对于长轨迹，这个假设尤其不可靠：成功轨迹中可能包含循环、没有证据的猜测、偶然奏效的工具调用，以及后来才被纠正的错误；失败轨迹中也可能包含正确计划、有用证据和已经完成的子目标。完整轨迹 SFT 会模仿前一类坏步骤，又会丢弃后一类好步骤。
 
-核心难点不是如何写出一个 weighted SFT loss，而是**可识别性**：从一个 logged action 和一个最终 outcome 出发，通常无法知道未被观察到的替代 action 会带来什么结果。因此，一个可信的 offline 方法不应为每一步伪造精确分数，而应该：
+真正的难点不是写出一个加权 SFT 损失，而是判断信用是否可以从现有数据中识别出来。只看到一个实际动作和一个最终结果，通常无法知道未执行的替代动作会带来什么结果。因此，一个可信的离线方法应该：
 
-1. 只比较行为上相似、且确实存在 action overlap 的状态；
-2. 通过证据和 memory provenance 表达延迟依赖；
-3. 返回**区间形式的 credit estimate**，当符号不可识别时选择 abstain；
-4. 将正向、负向和不确定片段编译为不同训练目标。
+1. 只比较语义状态相似、而且确实出现过多个替代动作的样本；
+2. 通过证据和记忆的来源链表达跨越很多轮的延迟依赖；
+3. 返回**区间形式的信用估计**，正负方向无法确定时明确拒绝判断；
+4. 把可靠正向、可靠负向和不确定片段转换成不同的训练数据。
 
-本文提出 **Conservative Provenance Credit Distillation (CPCD)**。其操作规则很简单：
+本文提出**保守证据来源链信用蒸馏**（Conservative Provenance Credit Distillation，CPCD）。它的核心规则是：只有当信用区间的下界仍然大于零时，才让模型模仿该片段；只有当区间上界仍然小于零，而且日志中存在可比较的更好动作时，才构造 DPO 偏好对；其余片段保留为上下文，但不计算模仿损失。
 
-> 只有当置信下界为正时才给予正向 SFT credit；只有当置信上界为负且存在被观察到的更好替代动作时，才构造负向 preference；否则保留该片段作为上下文，但 mask 掉 imitation loss。
-
-这个方法的预期贡献不是声称恢复每个 logged action 的真实因果价值，而是一种保守、可审计的方式：把异质 long-horizon logs 转换为 selective SFT 和 offline preference data，并显式支持 support、confounding 与 falsification tests。
+这个方法不声称能够恢复每个已记录动作的真实因果贡献。它提供的是一种保守、可审计的数据整理方式：把来源复杂的长时程轨迹转换为选择性 SFT 数据和离线偏好数据，并明确检查样本是否可比较、结论是否可能受到隐藏因素干扰，以及信用判断能否被中间状态干预实验推翻。
 
 ---
 
 ## 1. 问题、动机与挑战
 
-### 1.1 这里的 “offline credit assignment” 指什么
+### 1.1 本文所说的“离线信用归因”是什么
 
-设一条已记录的 agent trajectory 为
+设第 $i$ 条已记录的智能体轨迹为：
 
 $$
 \tau_i=(x_i,o_{i,1},a_{i,1},o_{i,2},a_{i,2},\ldots,o_{i,T_i},a_{i,T_i},y_i),
 $$
 
-其中 $x_i$ 是任务，$h_{i,t}$ 是 action $a_{i,t}$ 之前可见的 prefix，$y_i\in[0,1]$ 是 terminal verifier score。可用数据集为
+其中 $x_i$ 是任务，$o_{i,t}$ 是第 $t$ 轮观察，$a_{i,t}$ 是动作，$h_{i,t}$ 表示执行动作前已经可见的全部历史，$y_i\in[0,1]$ 是最终验证得分。数据集记为：
 
 $$
 \mathcal D=\{(\tau_i,y_i,b_i)\}_{i=1}^{N},
 $$
 
-其中 $b_i$ 可选记录 behavior policy、checkpoint、sampling temperature 和 logged action probabilities。
+其中 $b_i$ 可选记录生成轨迹的策略、模型检查点、采样温度和动作概率。
 
-目标训练目标是
+目标仍然是一个与 SFT 兼容的加权最大似然损失：
 
 $$
-\mathcal L_{\mathrm{weighted\text{-}SFT}}
-=-\sum_i\sum_t w_{i,t}\log \pi_\theta(a_{i,t}\mid h_{i,t}),
+\mathcal L_{\text{加权 SFT}}
+=-\sum_i\sum_t w_{i,t}\log \pi_\theta(a_{i,t}\mid h_{i,t}).
 $$
 
-也可以加入 preference losses。Credit assignment 的任务是决定 $w_{i,t}$、需要 mask 的 tokens，以及任何 preferred/dispreferred action pairs。
+信用归因的任务，就是确定每个权重 $w_{i,t}$、哪些目标词元应该被遮蔽，以及哪些动作能够组成“更好/更差”的偏好对。
 
-需要区分三种设定：
+需要区分三种数据和训练设定：
 
-| 设定 | 优化期间的环境调用 | 额外模型生成或标签 | 例子 |
+| 设定 | 优化期间是否调用环境 | 是否使用额外生成或标签 | 例子 |
 |---|---:|---:|---|
-| **严格 fixed-log offline** | 无 | 可选，但没有新的环境转移 | ATLaS, Q-SFT, HPL, Agentic-DPO, SWE-Lego |
-| **Offline curation / privileged annotation** | 无 | 强教师、参考解、patch 或 hindsight labeler | STeP, EEF, AgentHER, P2T, ACC |
-| **Semi-online 或 replay-based** | 有，在每轮之前或期间 | 通常有 | IPR, CSO, HSL 的实验设定, SWE-TRACE |
+| **严格冻结日志的离线训练** | 否 | 可以有离线标注，但不产生新环境转移 | ATLaS、Q-SFT、HPL、Agentic-DPO、SWE-Lego |
+| **离线筛选或特权信息标注** | 否 | 使用强教师、参考答案、标准补丁或事后标签器 | STeP、EEF、AgentHER、P2T、ACC |
+| **半在线或环境重放** | 是，在训练轮次之前或期间 | 通常有 | IPR、CSO、HSL 的实验设定、SWE-TRACE |
 
-本文提出的主设定是第一行。第二行是可选的更强监督版本，第三行只作为 upper bound。
+本文提出的方法主要属于第一种。第二种可作为使用更强监督的扩展，第三种只作为性能或信用质量上界。
 
-### 1.2 为什么 long horizon 会让普通 SFT 更糟
+### 1.2 为什么长时程会放大普通 SFT 的问题
 
-#### 延迟效应
+#### 很早的动作可能很晚才产生效果
 
-第 7 turn 收集到的 observation 可能支撑第 63 turn 的决策。turn distance 不是 relevance 的好 proxy，因此 recency mask 和 uniform discounting 会错过真实依赖。
+第 7 轮收集到的观察可能支撑第 63 轮的决策。轮次距离并不能准确表示相关性，所以只保留最近内容或按时间均匀衰减权重，都会错过真正的长期依赖。
 
-#### 成功轨迹不是干净 demonstration
+#### 成功轨迹并不是干净的示范
 
-terminal success label 只说明整个交互最终成功了，并不证明每个 search query、file edit、memory update 或 reasoning step 都正确。后续恢复可能掩盖有害动作。
+最终成功只说明整个交互最后完成了任务，并不能证明每次搜索、文件修改、记忆更新或推理都正确。一个有害动作可能在后续被纠正，从而隐藏在成功结果中。
 
-#### 失败轨迹不是全都坏
+#### 失败轨迹也不是全部有害
 
-失败可能来自长正确 prefix 之后的一个 pivotal action。Outcome filtering 会丢掉有用探索和稀有子技能，而这些恰恰出现在 successful expert data 稀缺的困难任务中。
+失败可能只来自一个很长的正确前缀之后的关键错误。如果按最终结果整体过滤，就会丢掉有用探索、正确诊断和稀有子技能，而这些内容在困难任务的成功专家数据中往往最稀缺。
 
-#### 部分可观测性造成 confounding
+#### 部分可观测性会产生隐藏混杂
 
-教师可能看到了 reference answer、隐藏 scratchpad、更完整的 browser state 或 repository metadata，而学生的 history 里没有这些信息。一个 action 可能因为这些隐藏信息而与成功相关，而不是因为它在学生可观测状态下有用。
+教师可能看到了参考答案、隐藏思考过程、更完整的浏览器状态或仓库元数据，而学生历史中没有这些内容。某个动作可能因为教师拥有隐藏信息而与成功相关，并不代表学生在自身可观测状态下模仿它就会有用。
 
-#### 精确状态复现很罕见
+#### 几乎找不到逐词完全相同的状态
 
-两条 80-turn histories 几乎不可能 token-by-token 完全一致。语义状态抽象是比较的必要条件，但过粗的抽象又可能合并约束、memory 内容或环境副作用不同的状态。
+两条 80 轮历史几乎不可能逐词元完全一致。要进行跨轨迹比较，必须把历史抽象成语义状态；但抽象过粗，又可能把任务约束、记忆内容或环境副作用不同的状态错误合并。
 
-#### 长轨迹可能主导优化器
+#### 长轨迹会不成比例地主导训练
 
-如果没有 trajectory-level normalization，一条 200-turn trace 会比一条 20-turn trace 贡献多得多的 supervised tokens。这会把“更好的 credit”与“每个任务的 gradient mass 变化”混在一起。
+如果不按轨迹归一化，一条 200 轮轨迹会比一条 20 轮轨迹贡献多得多的监督词元。这样就无法区分性能变化究竟来自更好的信用，还是来自每个任务梯度总量的变化。
 
-#### Credit quality 很少被直接测量
+#### 信用本身很少被直接评估
 
-多数工作只报告 downstream success。一个方法可能只是因为 regularization 或减少 tokens 而提升性能，即使它的 step scores 与 intervention-derived contribution 几乎无关。
+多数工作只报告最终任务成功率。一个方法可能只是因为正则化或减少训练词元而提升性能，即使它的步骤分数与真实干预贡献几乎无关。因此必须同时评估“信用是否正确”和“使用信用后策略是否变好”。
 
-### 1.3 为什么 offline approach 仍然值得做
+### 1.3 为什么离线方法仍然值得研究
 
-Offline agent logs 的吸引力在于，昂贵的环境、浏览器、容器和专有工具在训练期间不需要保持在线。历史部署也包含丰富的失败、恢复和 behavior policies，而普通 expert-only SFT 会忽视这些信息。工具 metadata、source URLs、file paths、test results、memory source indices 和 timestamps 提供了普通 reasoning transcript 中没有的结构信号。
+离线智能体日志的主要价值是：训练期间无需让昂贵的浏览器、容器和专有工具持续在线。历史部署日志还包含丰富的失败、恢复和多策略行为，而只保留专家成功轨迹的 SFT 会忽略这些信息。
 
-因此机会不是“从一条轨迹中推断一切”，而是组合：
+工具调用编号、来源网址、文件路径、测试结果、记忆来源编号和时间戳，提供了普通纯文本推理记录没有的结构。因此，合理的机会不是“从单条轨迹中推断一切”，而是组合：
 
-- 来自多 policy 或 stochastic rollouts 的 **cross-trajectory variation**；
-- 记录哪些证据后来被使用的 **prefix-grounded provenance**；
-- 工具 schema、测试和 state diffs 等 **local verifiers**；
-- 将缺少 support 变成 abstention、而不是猜测标签的 **conservative uncertainty estimates**。
+- 多个策略或随机采样轨迹带来的**跨轨迹差异**；
+- 记录哪些早期证据后来被使用的**前缀内来源链**；
+- 工具格式、测试和环境状态差异等**局部验证器**；
+- 在可比较样本不足时扩大区间并拒绝判断的**保守不确定性估计**。
 
-这可以降低 online RL 的成本和不稳定性，同时产出一个 SFT-compatible artifact，并且可以在训练前人工检查。
+这能够降低在线强化学习的成本和不稳定性，同时产出与 SFT 直接兼容、而且可以在训练前人工审计的数据。
 
 ### 1.4 无法绕过的可识别性限制
 
-假设所有到达抽象状态 $c$ 的 logged trajectories 都采取 action $u$ 并成功。观测数据同时兼容两个世界：
+假设日志中所有到达抽象状态 $c$ 的轨迹都选择动作 $u$ 并成功。仅根据这些观察，至少有两个世界都说得通：
 
-- 所有替代 action 都会失败，因此 $u$ 是 pivotal；
-- 某个替代 action 也会成功，因此 $u$ 并非必要。
+- 所有其他动作都会失败，所以 $u$ 是决定性动作；
+- 某个其他动作也会成功，所以 $u$ 并不是必要动作。
 
-没有任何 estimator 能仅从 fixed logs 中区分这两个世界。此时 point credit score 是 modeling assumption，而不是 identified causal effect。
+没有任何估计器能够只根据这些冻结日志区分两个世界。此时给出的单点信用分数主要反映模型假设，而不是被数据识别出的因果效果。
 
-因此 CPCD 要求在可比较状态中存在 repeated action variation，否则返回 vacuous interval。其因果解释依赖以下假设：
+因此，CPCD 要求在可比较状态中确实出现过不同动作；否则返回完全不确定的区间。其因果解释依赖四项假设：
 
-1. **consistency:** 抽象 action 对应稳定 intervention；
-2. **overlap:** 合理替代动作以非忽略概率出现；
-3. **sequential ignorability:** 记录的 prefix representation 包含 action 和 outcome 的重要 common causes，允许显式 sensitivity allowance；
-4. **stable continuation:** 在被比较 segment 之后，value 定义在 logged continuation-policy mixture 下。
+1. **一致性**：同一个抽象动作对应稳定、含义相近的真实干预；
+2. **动作重叠**：合理替代动作以不可忽略的概率出现在日志中；
+3. **序贯可忽略性**：状态表示包含了同时影响动作选择和最终结果的重要共同原因，并对遗漏因素做显式敏感性分析；
+4. **稳定延续**：比较当前片段之后的价值时，后续过程按照日志中已有策略的混合分布自然继续。
 
-如果缺少这些假设，输出应称为 **observational utility credit**，而不是 causal credit。
+如果这些假设缺乏支持，结果应称为**观察性效用信用**，而不是严格的因果信用。
 
-### 1.5 最小可用数据契约
+### 1.5 最小数据要求
 
-| 字段 | 状态 | 为什么重要 |
+| 字段 | 是否必需 | 作用 |
 |---|---|---|
-| Task ID 与 task-family ID | 必需 | 防止 train/test leakage，并支持 task-clustered uncertainty |
-| 有序 actions 与 observations | 必需 | 定义 prefixes 和延迟依赖 |
-| Terminal verifier outcome | 必需 | 提供需要归因的最终 utility |
-| 每个任务或 support cell 的多条 trajectories | signed credit 必需 | 提供 action overlap；单条 expert trace 只能支持 masking heuristic |
-| Tool-call IDs、result IDs、file/URL/test metadata | 强烈推荐 | 支持 deterministic provenance edges |
-| Behavior policy/checkpoint/temperature | 强烈推荐 | 让 propensity modeling 和 policy-mixture analysis 更可信 |
-| Logged action probabilities | 推荐 | 降低 propensity-model error；若 action classes 是离散的，则不是必需 |
-| 可恢复 state snapshots | 仅用于评估 | 支持 intervention-derived credit labels，而不把训练变成 online |
-| Reference answer 或 patch | 可选 privileged variant | 对比较有用，但排除在 primary fixed-log estimator 之外 |
+| 任务编号和任务族编号 | 必需 | 防止训练/测试泄漏，并支持以任务为单位估计不确定性 |
+| 有序动作与观察 | 必需 | 定义历史前缀和延迟依赖 |
+| 最终验证结果 | 必需 | 提供需要分配的最终效用 |
+| 每个任务或状态组的多条轨迹 | 正负信用必需 | 提供替代动作；单条专家轨迹最多只能支持启发式遮蔽 |
+| 工具调用、返回、文件/网址/测试元数据 | 强烈推荐 | 支持建立确定性的来源链边 |
+| 日志策略、检查点和采样温度 | 强烈推荐 | 让动作选择概率和混合策略分析更可信 |
+| 已记录的动作概率 | 推荐 | 降低动作概率模型误差；离散动作类别下并非绝对必需 |
+| 可恢复的环境快照 | 仅评估需要 | 支持通过中间状态干预获得信用标签，而不把训练变成在线过程 |
+| 参考答案或标准补丁 | 可选的特权版本 | 可用于对比，但不进入主要的冻结日志估计器 |
 
 ---
 
 ## 2. 相关工作与可复用思想
 
-### 2.1 直接相关的 SFT 与 offline trajectory 方法
+### 2.1 直接相关的 SFT 与离线轨迹方法
 
-| 工作 | 设定 | Credit 或 curation 信号 | 训练目标 | 贡献 | 对本项目的边界 |
+| 工作 | 设定 | 信用或数据筛选信号 | 训练目标 | 主要贡献 | 对本项目的局限 |
 |---|---|---|---|---|---|
-| [AWR](https://arxiv.org/abs/1910.00177) (2019) | Offline RL 基础 | Learned advantage | Advantage-weighted behavior cloning | 经典 weighted maximum-likelihood 视角 | 标量 value estimates 可能在 support 外 extrapolate；不是 LLM-agent 方法 |
-| [Q-SFT](https://arxiv.org/abs/2411.05193) (2024) | 静态 transition/reward data | 编码在 token probability 中的 Bellman/Q target | 无独立 value head 的 modified SFT | 说明 offline value learning 可保持 SFT-like objective | 需要 transition rewards，并继承 offline Q-learning 假设 |
-| [IPR / Watch Every Step](https://arxiv.org/abs/2406.11176) (2024) | Semi-online | 从 expert prefixes 出发的 Monte Carlo continuations | SFT 加 step/outcome preferences | 直接的 intervention-style expert-step value estimate | 中间环境 rollout 昂贵，且违反 strict offline training |
-| [ATLaS](https://arxiv.org/abs/2503.02197) (2025) | Fixed trajectories 加 LLM selector | planning、关键 observations/actions、self-correction 的二值 critical-step labels | 完整 context，只在 selected steps 上计算 loss | 清楚地区分“作为 context 可见”和“作为 target 学习” | 重要性由 judge 判断，不来自 counterfactual outcomes；hard mask 无 uncertainty |
-| [EEF](https://arxiv.org/abs/2504.13145) (2025) | Offline data curation | 从 failed expert traces 中挖掘 beneficial plans/actions | 把有用失败片段加入 fine-tuning | 证明 failed trajectories 不应整体丢弃 | Credit 依赖 failure-analysis heuristic，且未校准 |
-| [STeP](https://arxiv.org/abs/2505.20023) (2025) | Teacher-generated offline traces | Error、reflection 与 correction labels | 错误保留在 context 中，但 mask 其 loss | 展示 self-correction traces 中的 target/context separation | 依赖 synthetic reflection quality；主要是显式 error masking |
-| [Reward-Weighted Fine-Tuning](https://arxiv.org/abs/2506.06964) (2025) | Offline outcome-labeled traces | 单个 trajectory reward | Reward-weighted SFT | 强 trajectory-level offline baseline | 把同一个 reward 广播给每个 action，不能解决 within-trace credit |
-| [HPL](https://arxiv.org/abs/2510.03253) (2025) | Offline preference learning | Trajectory-, action-group-, step-level preferences | 带 curriculum 的 hierarchical DPO | 有用的多尺度 segmentation 和 preference formulation | 需要 contrasting groups，且没有 support-aware abstention |
-| [DML-IL](https://arxiv.org/abs/2502.07656) (2025) | Causal imitation-learning 基础 | Conditional moment restrictions；histories as instruments | History-dependent imitation policy | 明确建模 hidden confounding 和 trajectory history | 在 classical control 中验证，不是 language-agent traces；instrumental assumptions 仍然很强 |
-| [SWE-Lego](https://arxiv.org/abs/2601.01426) (2026) | SFT-only SWE training | 显式 tool-error masking 与 difficulty curriculum | 在 validated trajectories 上做 masked SFT | 直接的 long-horizon SFT baseline，含 18K validated traces 和 turn-length curriculum | Tool errors 只捕捉可见失败，不捕捉语义 detours 或延迟证据误用 |
-| [InT](https://arxiv.org/abs/2601.14209) (2026) | On-policy reasoning traces 加 references | First-error localization 与 one-step corrective intervention | 正确 prefix 加 correction 的 SFT，然后 RL | 精确 error-boundary supervision | 仅 reasoning、依赖 reference，且不是 fixed-log agent training |
-| [AgentHER](https://arxiv.org/abs/2603.21357) (2026) | Offline hindsight relabeling | Failure type、actually achieved outcome、confidence gate | Relabeled SFT/DPO examples | 把部分失败转换为 goal-conditioned successes | 改变 task label，而不是估计对原始目标的贡献 |
-| [P2T](https://arxiv.org/abs/2605.21996) (2026) | Privileged SWE curation | 从 reference patch 到 latent process graph；grounded progress 与 length | 在 shortest effective segments 上做 SFT | 对真实 SWE horizon 最接近的 provenance/process-graph 启发 | 需要 reference patch、可执行测试、teacher continuations 和 LLM judges |
-| [ACC](https://arxiv.org/abs/2605.21850) (2026) | Offline trajectory compilation | 远距离 tool observations 变成 long-context QA evidence | Direct-answer SFT | 展示 logged evidence 如何监督长程 integration | 训练 context reasoning，而非 action-level utility credit |
-| [HSL / Spinning Straw into Gold](https://arxiv.org/abs/2607.04235) (2026) | Hindsight relabeling；实验中使用 iterative rollouts | Achieved goals、irrelevant-action mask、sample weight | 在 relabeled goals 上做 SFT 或 DPO | 利用 unintended successes，并报告 long horizons 上更大收益 | 实验 pipeline 会收集新 trajectories 并优化 relabeled goals，因此本身不是 strict fixed-log 解法 |
-| [Agentic-DPO](https://arxiv.org/abs/2607.10601) (2026) | 优化期间无环境交互 | 每个 expert state 上的 expert action vs one-step student negative | DPO 加 SFT anchor 与 policy-preserving augmentation | 最近最接近的 strict-offline state-conditioned action baseline；在 tau-bench retail 与 Mind2Web 上测试 | 默认每个 expert action 都是 preferred；不覆盖 student-only states 和有用 failure segments |
+| [AWR](https://arxiv.org/abs/1910.00177) (2019) | 离线强化学习基础 | 学习得到的优势值 | 按优势加权的行为克隆 | 建立了按优势加权最大似然训练的经典视角 | 标量价值可能在数据覆盖范围外错误外推；不是语言智能体方法 |
+| [Q-SFT](https://arxiv.org/abs/2411.05193) (2024) | 静态转移和奖励数据 | 编码在词元概率中的贝尔曼/Q 值目标 | 不使用独立价值头的改造版 SFT | 说明离线价值学习可以保持接近 SFT 的训练形式 | 需要转移奖励，并继承离线 Q 学习的假设 |
+| [IPR / Watch Every Step](https://arxiv.org/abs/2406.11176) (2024) | 半在线 | 从专家前缀出发做蒙特卡洛后续采样 | SFT 加步骤/结果偏好 | 直接估计专家步骤的干预式价值 | 中间环境采样成本高，不属于严格离线训练 |
+| [ATLaS](https://arxiv.org/abs/2503.02197) (2025) | 固定轨迹加大模型选择器 | 规划、关键观察/动作和自我纠正的二值标签 | 完整历史作为输入，只在选中步骤上计算损失 | 清楚区分“作为上下文可见”和“作为目标学习” | 重要性由评审器判断，不来自反事实结果；硬遮蔽没有不确定性 |
+| [EEF](https://arxiv.org/abs/2504.13145) (2025) | 离线数据筛选 | 从失败专家轨迹中挖掘有益计划和动作 | 把有用失败片段加入微调 | 证明失败轨迹不应整体丢弃 | 依赖启发式失败分析，信用没有校准 |
+| [STeP](https://arxiv.org/abs/2505.20023) (2025) | 教师生成的离线轨迹 | 错误、反思和纠正标签 | 错误保留为上下文，但遮蔽其损失 | 展示自我纠正轨迹中的上下文/目标分离 | 依赖合成反思质量，主要解决显式错误遮蔽 |
+| [Reward-Weighted Fine-Tuning](https://arxiv.org/abs/2506.06964) (2025) | 带最终结果的离线轨迹 | 整条轨迹的单一奖励 | 按奖励加权的 SFT | 很强的轨迹级离线基线 | 把同一奖励广播给所有动作，不能解决轨迹内部归因 |
+| [HPL](https://arxiv.org/abs/2510.03253) (2025) | 离线偏好学习 | 轨迹级、动作组级和步骤级偏好 | 带课程学习的层级 DPO | 提供多尺度切分和偏好建模 | 需要对比组，没有根据样本支持度拒绝判断的机制 |
+| [DML-IL](https://arxiv.org/abs/2502.07656) (2025) | 因果模仿学习基础 | 条件矩约束；用历史作为工具变量 | 依赖历史的模仿策略 | 明确建模隐藏混杂和轨迹历史 | 在经典控制中验证，不是语言智能体轨迹；工具变量假设仍很强 |
+| [SWE-Lego](https://arxiv.org/abs/2601.01426) (2026) | 仅用 SFT 的软件工程训练 | 显式工具错误遮蔽和难度课程 | 在验证过的轨迹上做遮蔽 SFT | 直接的长时程 SFT 基线，含 1.8 万条验证轨迹和轮数课程 | 工具错误只覆盖可见失败，不能识别语义绕路和延迟证据误用 |
+| [InT](https://arxiv.org/abs/2601.14209) (2026) | 在线策略推理轨迹加参考答案 | 首个错误定位和一步纠正干预 | 正确前缀加纠正的 SFT，随后做 RL | 提供精确的错误边界监督 | 仅研究推理，依赖参考答案，也不是冻结日志训练 |
+| [AgentHER](https://arxiv.org/abs/2603.21357) (2026) | 离线事后重标注 | 失败类型、实际达成结果和置信门槛 | 重标注后的 SFT/DPO 样本 | 把部分失败转为条件目标成功 | 改变任务标签，而不是估计动作对原目标的贡献 |
+| [P2T](https://arxiv.org/abs/2605.21996) (2026) | 使用特权信息的软件工程数据筛选 | 从标准补丁生成隐式过程图，并评估有依据的进度和长度 | 对最短有效片段做 SFT | 是真实 SWE 中最接近来源链/过程图的启发 | 需要标准补丁、可执行测试、教师续写和大模型评审器 |
+| [ACC](https://arxiv.org/abs/2605.21850) (2026) | 离线轨迹编译 | 把远距离工具观察转换成长上下文问答证据 | 直接回答式 SFT | 展示如何用日志证据监督长程信息整合 | 训练的是上下文推理，不是动作级效用信用 |
+| [HSL / Spinning Straw into Gold](https://arxiv.org/abs/2607.04235) (2026) | 事后重标注；实验中迭代采样 | 已达成目标、无关动作遮蔽和样本权重 | 对重标注目标做 SFT 或 DPO | 利用意外成功，并报告长轨迹上收益更大 | 实验会采集新轨迹并优化重标注目标，不是严格冻结日志方法 |
+| [Agentic-DPO](https://arxiv.org/abs/2607.10601) (2026) | 优化期间不调用环境 | 每个专家状态上的专家动作与学生一步负例 | DPO 加 SFT 锚点和策略保持增强 | 最接近的严格离线状态条件动作基线，在 tau-bench retail 和 Mind2Web 上测试 | 默认每个专家动作都更好，不覆盖学生独有状态和失败轨迹中的有用片段 |
 
-### 2.2 应影响方法或评估的相邻工作
+### 2.2 对方法和评估有直接启发的相邻工作
 
 | 工作 | 可复用思想 | 对本方案的影响 |
 |---|---|---|
-| [ECHO](https://arxiv.org/abs/2606.31650) | Source-indexed memory 与 credit routing 到 evidence turns 和 selection actions | 启发 provenance graph；但 CPCD 从 fixed logs 中估计 utility，并且可以 abstain，而不是只路由正向 terminal credit |
-| [CSO](https://arxiv.org/abs/2602.03412) | 识别 critical steps、生成 expert alternatives、从这些状态 branch、验证 outcomes | 作为 semi-online upper bound，也作为 evaluation-only intervention labels 的方案 |
-| [SWE-TRACE](https://arxiv.org/abs/2604.14820) | Rubric process reward 与 long-token SWE evaluation | 提供真实 process-judge baseline 和 horizon-stratified evaluation |
-| [HORIZON](https://arxiv.org/abs/2604.11978) | 对 3,100+ multi-domain trajectories 做 failure attribution | 启发直接 credit-quality 与 root-cause metrics，而不只报告 success |
-| [OpenResearcher](https://arxiv.org/abs/2603.20278) | 含 100+ tool calls 长尾的大规模 offline deep-research corpus | 候选数据源和真正 long-horizon stress test |
-| [CFT](https://arxiv.org/abs/2510.10974) 与 [DFT](https://arxiv.org/abs/2508.05629) | Selective 或 dynamically reweighted token SFT | 有用的 optimization controls，但 token salience 不等于延迟 action contribution |
-| [CurateEvo](https://arxiv.org/abs/2607.06140) | 用 held-out failures 驱动 iterative data-curation programs | 有用的 system-level baseline；它优化 curator，而不是在冻结 logs 中识别 step effects |
+| [ECHO](https://arxiv.org/abs/2606.31650) | 带来源编号的记忆，把信用路由到证据轮次和选择动作 | 启发来源链图；CPCD 还利用冻结日志估计效用并允许拒绝判断，而不只是路由正向最终信用 |
+| [CSO](https://arxiv.org/abs/2602.03412) | 识别关键步骤、生成专家替代动作、从中间状态分支并验证结果 | 作为半在线性能上界，也用于设计只在评估阶段使用的干预标签 |
+| [SWE-TRACE](https://arxiv.org/abs/2604.14820) | 规则表过程奖励和长词元软件工程评测 | 提供真实的过程评审器基线和按轨迹长度分层的评估 |
+| [HORIZON](https://arxiv.org/abs/2604.11978) | 对 3100 多条多领域轨迹做失败归因 | 启发直接评估信用质量和根因，而不只报告最终成功率 |
+| [OpenResearcher](https://arxiv.org/abs/2603.20278) | 大规模离线深度研究语料，长尾包含 100 次以上工具调用 | 可作为真正长时程压力测试的数据源 |
+| [CFT](https://arxiv.org/abs/2510.10974) 与 [DFT](https://arxiv.org/abs/2508.05629) | 选择性或动态重加权的词元级 SFT | 是有用的优化对照，但词元显著性不等于延迟动作贡献 |
+| [CurateEvo](https://arxiv.org/abs/2607.06140) | 用留出失败样本驱动迭代数据筛选程序 | 是有用的系统级基线；它优化筛选器，而不是从冻结日志识别步骤效果 |
 
-### 2.3 仍然缺失什么
+### 2.3 现有工作仍未解决的问题
 
-直接相关文献已经覆盖 hard step selection、显式 error masking、failure mining、Q/advantage weighting、hindsight goal relabeling 和 state-conditioned preferences。剩余空白是把以下几项结合起来：
+直接相关文献已经覆盖关键步骤选择、显式错误遮蔽、失败片段挖掘、Q 值或优势加权、事后目标重标注和状态条件偏好学习。仍然缺少的是把以下能力组合起来：
 
-1. **严格 offline、long-horizon agent traces**，而不是短 reasoning responses；
-2. **failure 与 recovery-aware signed credit**，而不是假设每个 expert action 都是正向；
-3. 表达跨很多 turns 依赖的 **semantic provenance**；
-4. **support-aware uncertainty and abstention**，而不是为每一步给 scalar score；
-5. 使用 held-out interventions 的**直接 causal-credit evaluation**。
+1. 处理**严格离线的长时程智能体轨迹**，而不只是较短的推理回答；
+2. 同时识别失败与恢复过程中的正向和负向信用，而不是假设每个专家动作都值得模仿；
+3. 用**语义来源链**表达跨越很多轮交互的延迟依赖；
+4. 根据可比较样本是否充足来估计不确定性，并允许拒绝判断，而不是为每一步强行生成单一分数；
+5. 使用只用于评估的中间状态干预，直接检验信用正负是否正确。
 
-### 2.4 Closest-work 对比
+### 2.4 与最接近工作的对比
 
-| 维度 | ATLaS | Agentic-DPO | P2T | DML-IL | Proposed CPCD |
+| 维度 | ATLaS | Agentic-DPO | P2T | DML-IL | 本文提出的 CPCD |
 |---|---|---|---|---|---|
-| 主要监督 | LLM criticality label | Expert vs sampled action | Reference-patch process graph | 来自 demonstrations 的 conditional moments | Outcome variation 加 logged provenance |
-| 使用 failed traces | 不是核心 | 否 | Teacher failures 可用于 curation | 一般 demonstrations | 是，若存在 matched support |
-| Negative credit | Mask unselected steps | 对 sampled negative 做 preference | 移除低效/不 grounded 片段 | 通过 policy estimation 隐式体现 | 只有 interval 严格为负且存在正向 logged alternative 时使用 |
-| 长延迟表达 | 完整 text context | Expert state prefix | Privileged process graph | History-dependent policy | Source-to-use provenance DAG |
-| 无 support 时如何处理 | 无显式机制 | sample 一个 plausible negative | Judge/privileged score | 依赖 identification assumptions | 返回 vacuous interval 并 mask loss |
-| Causal-credit metric | 无 | 无 | Progress/grounding analyses | Imitation gap | Intervention sign、risk-coverage 与 calibration |
+| 主要监督 | 大模型判断的关键步骤标签 | 专家动作与采样动作的对比 | 参考补丁生成的过程图 | 示范数据中的条件矩约束 | 最终结果差异与日志来源链 |
+| 是否使用失败轨迹 | 不是核心 | 否 | 可用教师失败进行筛选 | 一般示范数据 | 是，但要求存在可比较样本 |
+| 如何处理负向信用 | 遮蔽未选步骤 | 把采样动作作为负例 | 移除低效或缺乏依据的片段 | 通过策略估计隐式体现 | 仅当区间可靠为负且存在真实正向对照时使用 |
+| 如何表达长延迟 | 完整文本上下文 | 专家状态前缀 | 使用特权信息构造的过程图 | 依赖历史的策略 | 从证据产生到使用的来源链图 |
+| 缺少可比较样本时 | 没有显式机制 | 采样一个看似合理的负例 | 依赖评审器或特权分数 | 依赖可识别性假设 | 返回完全不确定区间，并遮蔽损失 |
+| 是否直接评估信用 | 否 | 否 | 分析进度和事实依据 | 模仿误差 | 干预符号、风险—覆盖率和校准误差 |
 
-这个对比定义了 novelty boundary。CPCD 不应声称 selective SFT、process graphs、doubly robust estimation 或 DPO 本身是新的。
+这个对比界定了本方案的创新边界。CPCD 不应声称选择性 SFT、过程图、双重稳健估计或 DPO 本身是新的；它的潜在贡献在于把这些组件组合成一套适用于冻结长轨迹、能够拒绝不可靠判断的信用归因流程。
 
 ---
 
-## 3. Proposed method: Conservative Provenance Credit Distillation
+## 3. 建议方法：保守证据来源链信用蒸馏（CPCD）
 
-### 3.1 Research question 与 hypotheses
+### 3.1 方法要解决什么问题
 
-**研究问题。** 一个冻结的、异质的 long-horizon agent logs 集合能否支持可靠的 signed segment credit？在不增加环境交互的前提下，保守使用这种 credit 能否优于 full SFT 和 offline preference baselines？
+我们拥有一批已经采集完毕、之后不再变化的智能体轨迹。每条轨迹都包含任务、逐轮观察、动作、工具返回、记忆操作和最终成败，但没有每一步的正确答案。我们希望只利用这些现成数据，回答三个问题：
 
-预注册假设：
+1. 一条成功轨迹中的哪些片段真正值得模仿？
+2. 一条失败轨迹中的哪些片段仍然有用，哪些片段很可能导致了失败？
+3. 当现有数据不足以回答前两个问题时，怎样明确表示“不知道”，而不是制造一个不可靠的分数？
 
-- **H1, selective utility:** 在相同 supervised-token budget 下，certified-positive segments 比 full SFT 和 random masks 带来更高 Success@1。
-- **H2, long-delay structure:** source-to-use distance 和总 trajectory length 越大，provenance 对 credit precision 与 task performance 的帮助越明显。
-- **H3, conservatism:** interval abstention 相比 point estimates 能降低 false-sign credit，并改善 risk-coverage curve。
-- **H4, failure reuse:** 从 failed trajectories 中恢复的 positive segments 能在 hard/OOD tasks 上提供超出 success-only training 的收益。
+保守证据来源链信用蒸馏（下文简称 CPCD）的输出不是“每一步都有一个精确分数”，而是把轨迹片段分成三类：
 
-### 3.2 一个核心原则
+| 判断结果 | 含义 | 训练时怎么处理 |
+|---|---|---|
+| 可靠正向 | 现有证据较充分地表明，该片段比同状态下出现过的替代动作更有利 | 作为加权 SFT 目标，让模型学习 |
+| 可靠负向 | 现有证据较充分地表明，该片段比已出现的替代动作更差 | 只有存在可比较的可靠正向动作时，才组成 DPO 偏好对 |
+| 无法判断 | 样本太少、状态不可比、隐藏因素太强，或估计区间跨过零 | 片段仍保留在上下文中，但不对其计算模仿损失 |
 
-该方法是一个从 frozen logs 到 training targets 的 compiler：
+因此，“保守”不是简单地少用数据，而是只在证据足以确定正负方向时更新模型。“来源链”则负责表示一个早期动作怎样经过证据、记忆和后续决策，在几十轮之后影响结果。
 
-```text
-frozen trajectories
-        |
-        v
-typed segments + prefix-grounded provenance DAG
-        |
-        v
-semantic state/action support cells
-        |
-        v
-cross-fitted outcome/propensity models
-        |
-        v
-sensitivity-aware credit interval [L, U]
-        |
-        +----------------+------------------+
-        |                |                  |
-      L > 0            U < 0          interval crosses 0
-        |                |                  |
- weighted SFT     observed-pair DPO     context-only mask
-```
+### 3.2 一个贯穿本章的例子
 
-graph、estimator 和 verifier 仅是训练时组件。推理时使用 fine-tuned policy，不需要 critic 或 provenance extractor。
+考虑一个软件工程智能体。任务是修复登录令牌失效的问题。日志中有三条从相似仓库状态开始的轨迹：
 
-### 3.3 Step 1: 构建 typed provenance DAG
+| 轨迹 | 关键过程 | 最终结果 |
+|---|---|---|
+| A | 运行失败测试 → 查看认证日志 → 阅读配置文件 → 修改超时参数 | 测试仍失败 |
+| B | 运行失败测试 → 查看认证日志 → 阅读令牌解析代码 → 修复时区转换 → 测试通过 | 成功 |
+| C | 运行失败测试 → 查看认证日志 → 做了两次无关搜索 → 阅读令牌解析代码 → 修复时区转换 → 测试通过 | 成功 |
 
-对每条 trajectory，构造有时间戳节点的有向无环图 $G_i=(V_i,E_i)$：
+如果按照整条轨迹的成败做 SFT，轨迹 A 的所有动作都被丢弃，轨迹 C 的两次无关搜索却会被当成正确示范。CPCD 希望得到更细致的结论：
 
-- task constraints 与 subgoals；
-- tool actions 与 environment state changes；
-- observations 与 evidence spans；
-- memory writes、updates、retrievals 与 summaries；
-- 使用早期证据的 claims 或 decisions；
-- locally verified milestones；
-- terminal outcome。
+- “运行失败测试”和“查看认证日志”在成功与失败轨迹中都可能是有用的诊断步骤，不应因为轨迹 A 最终失败而被整体判负；
+- 在相似状态下，“修复时区转换”比“修改超时参数”更可能带来成功，因此前者可以获得正向信用，后者可以获得负向信用；
+- 轨迹 C 中的两次无关搜索没有形成通向修复结果的证据来源链，也没有足够的对照证明它们有害，因此最稳妥的做法是保留为历史上下文，但不让模型模仿；
+- 如果第 12 轮阅读到的时区信息先被写入记忆，第 61 轮才被取出并用于修改代码，来源链会记录“阅读代码 → 写入记忆 → 取回记忆 → 修改代码 → 测试通过”，而不是因为相隔很远就忽略第 12 轮。
 
-边类型为 `produces`、`supports`、`uses`、`updates`、`retrieves`、`enables` 或 `verifies`。
+这个例子也说明，CPCD 同时使用两类信息：
 
-构造时遵循严格优先级：
+1. **跨轨迹比较**：在相似状态下，不同动作与最终结果之间有什么稳定差异；
+2. **单轨迹来源链**：一个早期片段是否真的向后续决策提供了证据或产生了可验证的环境变化。
 
-1. 来自 tool-call/result IDs、file paths、URLs、test IDs 和 memory source indices 的 deterministic metadata edges；
-2. state transitions 与 milestone checks 的 schema rules；
-3. 只看 prefix 的 semantic extractor，用于 support/use edges。
+前者判断“可能有多大用处”，后者判断“这份用处是否有一条可追溯的作用路径”。
 
-在 primary setting 中，extractor 可以看到当前 prefix，但不能看到未来 observations、terminal reference answer 或 developer patch。每条 semantic edge 都必须引用一个更早的 source span。指向未来或缺少 source 的边会被拒绝。
+### 3.3 核心术语
 
-DAG 是一种 **eligibility structure**，不是因果证明。它回答“这个早期 segment 是否可能支持这个后续 decision？”；eligible segment 是获得正向还是负向 utility credit，由 outcome variation 决定。
+为避免后文反复中英文混用，本章统一使用以下术语：
 
-### 3.4 Step 2: 定义 semantic segments 与 treatments
+| 术语 | 本文含义 |
+|---|---|
+| **轨迹片段** | 一个具有完整语义的小过程，例如一次工具调用及返回、一次记忆写入、一次代码修改及局部测试 |
+| **语义动作** | 去掉具体措辞后的动作类别，例如“读取认证模块”“运行登录测试”“修改时间解析逻辑” |
+| **可比较状态组** | 任务约束、已完成子目标、工具条件、环境状态和记忆内容足够相近的一组历史前缀 |
+| **样本支持度** | 在一个可比较状态组中，是否确实出现过多个可替代动作，以及每种动作的样本是否足够 |
+| **证据来源链** | 从信息产生、记忆写入或环境变化开始，经过后续取用和决策，最终到达可验证里程碑的有向路径 |
+| **信用区间** | 对片段贡献的区间估计 $[L,U]$；区间越窄，说明正负方向越确定 |
+| **事实依据度** | 动作是否由当时已经可见的观察、证据和合法工具状态支持 |
+| **来源链流量** | 一个片段通过来源链实际连接到后续已验证结果的程度 |
+| **拒绝判断** | 数据不足时不产生正负训练标签，只保留上下文 |
 
-Turn-level credit 对多调用 subroutines 来说太细，对混合 thought/action turns 又太粗。使用 deterministic boundaries 将 trace 折叠为 semantic segments $z_{i,j}$：
+“可比较状态组”对应因果估计中的支持集合，“拒绝判断”对应统计上的弃权机制。后文会在首次使用公式时说明它们的技术定义。
 
-- 一个 tool call 及其返回 observation；
-- 一个 memory operation 及其引用 sources；
-- 一次 edit 及其随后的 local test；
-- 产生一个 evidence item 的 search/read sequence；
-- 一次 plan/subgoal transition；
-- final decision 或 answer claim。
+### 3.4 输入、输出与基本假设
 
-对每个 segment 定义：
+#### 输入
+
+方法至少需要：
+
+- 多条冻结轨迹，而不是只有一条专家示范；
+- 每条轨迹的最终验证结果，例如任务是否成功、通过了多少测试或答案得分；
+- 有序的动作、观察和工具返回；
+- 任务编号，确保同一任务的片段不会同时泄漏到模型拟合和信用评估两侧。
+
+最好还记录：
+
+- 工具调用编号和返回编号；
+- 文件路径、网址、测试编号和环境状态差异；
+- 记忆条目的来源编号；
+- 生成轨迹的模型、检查点和采样温度；
+- 采样动作的概率。
+
+#### 输出
+
+CPCD 生成三类可直接训练的数据：
+
+1. 带权重的正向 SFT 样本；
+2. 来自同一可比较状态的 DPO 偏好对；
+3. 只作为上下文出现、目标词元被遮蔽的片段。
+
+#### 需要明确承认的假设
+
+该方法要把相关性解释为因果方向，至少依赖以下假设：
+
+1. **动作含义稳定**：同一语义动作在相似状态中代表大体相同的干预；
+2. **存在替代动作**：同一类状态中不只有一种动作，否则无法比较；
+3. **重要条件已被记录**：决定动作选择和最终结果的重要因素，大部分包含在状态表示中；
+4. **后续策略可比**：执行当前动作后，轨迹由日志中已有策略的混合分布自然继续。
+
+第三项在真实智能体日志中很难完全满足，所以 CPCD 不把单点估计直接当成真值，而是进一步扩大区间，检查结论对隐藏因素有多敏感。
+
+### 3.5 总体流程
+
+整个方法可以理解成一个“训练数据编译器”：
+
+    冻结的长轨迹日志
+            |
+            v
+    切分为具有明确含义的轨迹片段
+            |
+            v
+    建立“证据产生—保存—取用—决策—结果”的来源链图
+            |
+            v
+    把相似历史放入同一个可比较状态组
+            |
+            v
+    比较组内不同语义动作与最终结果的关系
+            |
+            v
+    为每个片段计算保守的信用区间 [L, U]
+            |
+            +------------------+------------------+
+            |                  |                  |
+          L > 0              U < 0          L <= 0 <= U
+            |                  |                  |
+       加权 SFT        有正向对照时做 DPO       只保留上下文
+
+来源链图、信用估计器和检查器都只在训练数据整理阶段使用。训练完成后，部署的仍然是普通智能体策略，不需要额外运行价值模型或来源链提取器。
+
+### 3.6 第一步：把长轨迹切分成有意义的片段
+
+逐词元归因太细，因为一次工具调用可能跨越很多词元；逐轮归因有时又太粗，因为一轮中可能同时包含思考、调用工具和处理结果。CPCD 使用确定性的规则，把轨迹切成语义完整的片段 $z_{i,j}$。
+
+建议的切分单位包括：
+
+- 一次工具调用及其返回观察；
+- 一次记忆写入、更新、删除或取回；
+- 一次代码修改及紧随其后的局部测试；
+- 共同产生一条证据的搜索和阅读过程；
+- 一次计划或子目标切换；
+- 一次最终决定、答案陈述或可验证声明。
+
+切分规则应尽量依赖日志结构，而不是让大模型自由判断边界。例如，工具调用编号天然给出开始和结束；一次代码修改可以与随后第一次相关测试组成一个片段。只有日志结构不足时，才使用语言模型辅助切分，并在人工标注的小样本上检查一致性。
+
+每个片段保留两份表示：
+
+1. **原始文本和动作词元**：真正用于 SFT；
+2. **抽象语义表示**：只用于寻找可比较样本。
+
+这一步很重要。我们并不是让模型学习抽象标签“读取文件”，而是用抽象标签找到其他相似决策，最后仍然训练原始的具体动作。
+
+### 3.7 第二步：建立证据来源链图
+
+对每条轨迹构造一个带时间顺序的有向无环图 $G_i=(V_i,E_i)$。
+
+#### 节点
+
+图中的节点包括：
+
+- 任务约束和子目标；
+- 工具动作和环境状态变化；
+- 观察结果和证据片段；
+- 记忆的写入、更新、取回和摘要；
+- 使用早期证据形成的判断或动作；
+- 局部可验证的里程碑，例如某个测试从失败变为通过；
+- 最终任务结果。
+
+#### 边
+
+边表示“前一个节点怎样影响或支持后一个节点”，例如：
+
+- 工具调用产生了一条观察；
+- 某条证据支持了后续判断；
+- 一次记忆写入保存了早期证据；
+- 后续决策取回并使用了这条记忆；
+- 一次代码修改使某项测试通过；
+- 局部测试验证了一个子目标。
+
+构图时按可靠性从高到低使用三类信息：
+
+1. **确定性元数据**：工具调用编号、文件路径、网址、测试编号、记忆来源编号；
+2. **环境规则**：状态变化、测试结果和任务里程碑；
+3. **只看当前及过去内容的语义提取器**：补充“哪条证据支持了哪个判断”。
+
+第三类提取器绝不能看到未来观察、最终参考答案或标准补丁。否则它可能事后把成功信息泄漏回早期片段。每条语义边都必须指向一个确实更早出现的来源；无法定位来源的边直接丢弃。
+
+需要强调：来源链只说明“这个片段有可能通过某条路径影响后续结果”，并不能单独证明它有用。例如，读取一个错误文件也可能被后续决定引用。片段究竟得到正信用还是负信用，仍由跨轨迹的结果差异决定。
+
+### 3.8 第三步：构造可比较状态组和语义动作
+
+对第 $i$ 条轨迹的第 $j$ 个片段，记执行前的历史为 $h_{i,j}$。我们分别提取：
 
 $$
 c_{i,j}=\phi(h_{i,j}), \qquad u_{i,j}=\psi(z_{i,j}),
 $$
 
-其中 $c$ 是 support-cell representation，$u$ 是 semantic action class。
+其中：
 
-$\phi(h)$ 包括 task constraints、verified milestones、available tools、environment fingerprints、current memory contents、behavior-policy ID 和 compact provenance features。$\psi(z)$ 包括 event type 和 normalized effect signature，例如 `read(file, symbol-family)`、`run(test-scope)`、`search(query-intent)`、`edit(component, operation-type)` 或 `retrieve(memory-topic)`。
+- $c_{i,j}$ 是可比较状态表示；
+- $u_{i,j}$ 是语义动作类别。
 
-精确 output tokens 仍然是 SFT target。抽象表示只用于寻找可比较的 logged decisions。
+状态表示 $\phi(h)$ 至少包含：
 
-#### Action-class audit
+- 当前任务和硬约束；
+- 已完成且经过验证的子目标；
+- 可用工具及权限；
+- 关键环境状态，例如当前页面、仓库提交和已修改文件；
+- 当前记忆内容；
+- 轨迹由哪个模型或检查点生成；
+- 与当前决策有关的紧凑来源链特征。
 
-如果一个 semantic class 的成员在其他相似 prefixes 下会导致实质不同的 next-state effects，则该 class 无效。在 held-out fold 上：
+语义动作 $\psi(z)$ 描述动作类型和作用对象。例如：
 
-1. 计算 normalized next-observation 或 state-diff signatures；
-2. 在 conditioning on $c$ 之后测量 within-class disagreement；
-3. 若 disagreement 超过 held-out 90th-percentile noise floor，则拆分该 class；
-4. 如果没有稳定 split 具有足够 support，则给该 class 赋予 $[-1,1]$ credit。
+- 读取某个模块中的符号族；
+- 运行某一范围的测试；
+- 按某种意图进行搜索；
+- 对某个组件执行某类修改；
+- 取回某个主题的记忆。
 
-这可以避免把 `read(file)` 这种宽泛 class 当作一个稳定 action，即使具体读哪个文件才是决定性因素。
+然后把状态表示足够相近的片段放入同一个可比较状态组。在同一组中，只有确实出现过的不同语义动作才互为替代动作。
 
-### 3.5 Step 3: 定义 estimand
+#### 为什么不能只比较文本相似的历史
 
-对 support cell $c$ 和 semantic action $u$，定义 natural-continuation value：
+两段历史即使文字很像，也可能有不同的文件修改、登录状态或记忆内容。反过来，两段文字不完全相同，也可能处于同一个真正的任务状态。因此，分组时环境状态、已验证里程碑和记忆内容应优先于纯文本相似度。
+
+#### 检查语义动作是否过粗
+
+“读取文件”通常过于宽泛，因为读取配置文件和读取认证代码的效果完全不同。对每个语义动作类别，应在留出的数据上检查其下一步观察或环境变化是否一致：
+
+1. 计算动作后的观察摘要或状态差异；
+2. 在状态条件相近时，测量同类动作结果的分歧；
+3. 分歧过大就继续细分动作类别；
+4. 细分后样本仍不足，则拒绝为该类别判断信用。
+
+### 3.9 第四步：明确究竟要估计什么
+
+CPCD 不试图回答“全世界最优的动作是什么”，也不假设能把未来所有动作固定不变。它只回答一个更有限、但可由离线日志支持的问题：
+
+> 在当前这类状态中，选择语义动作 $u$，然后让后续过程按照日志中已有策略自然继续，其最终结果是否优于日志里真实出现过的其他动作？
+
+对可比较状态 $c$ 和语义动作 $u$，定义自然延续价值：
 
 $$
-V(u,c)=\mathbb E\left[Y\mid \operatorname{do}(U=u),C=c,
-\text{future follows the logged policy mixture}\right].
+V(u,c)=\mathbb E\left[
+Y\mid \operatorname{do}(U=u), C=c,
+\text{之后按日志中的策略混合分布继续}
+\right].
 $$
 
-Credit 是相对于 observed alternative actions 的 contrast：
+其中 $Y$ 是最终任务得分。动作 $u$ 的相对信用定义为：
 
 $$
 \Delta(u,c)=V(u,c)-
-\sum_{v\ne u}\bar e(v\mid c,U\ne u)V(v,c),
+\sum_{v\ne u}\bar e(v\mid c,U\ne u)V(v,c).
 $$
 
-其中 $\bar e$ 是限制在 alternatives 上的 behavior-policy mixture。这个 estimand 问的是：选择 $u$ 是否优于 logs 中实际出现过的 alternatives。它不估计 unconstrained optimal action，也不要求未来 actions token-by-token 固定。
+第二项是同状态下其他已观察动作的加权平均结果。因此：
 
-### 3.6 Step 4: 用 cross-fitted doubly robust learning 估计 credit
+- $\Delta(u,c)>0$：动作 $u$ 比日志中已有替代动作平均更好；
+- $\Delta(u,c)<0$：动作 $u$ 平均更差；
+- 接近零：现有数据看不出稳定差异。
 
-按 task 或 repository 切分数据，绝不按 segment 切分。对每个 held-out fold，在其余 folds 上拟合：
+这个定义的边界很清楚：如果日志里从未出现替代动作，CPCD 就无法判断当前动作是不是必要，也不会凭空生成一个反事实动作。
 
-- behavior propensity model $\hat e(u\mid c)$；
-- outcome model $\hat Q(c,u)\approx\mathbb E[Y\mid C=c,U=u]$。
+### 3.10 第五步：用交叉拟合和双重稳健估计计算信用
 
-对 local support cell 中的 action $u$，使用 doubly robust estimate：
+直接比较“做了动作 $u$ 的轨迹成功率”和“没做动作 $u$ 的轨迹成功率”通常有偏差，因为不同策略会在不同难度的状态下选择不同动作。CPCD 因此拟合两个辅助模型：
+
+1. **动作选择概率模型** $\hat e(u\mid c)$：在状态 $c$ 下，日志策略选择动作 $u$ 的概率；
+2. **结果预测模型** $\hat Q(c,u)$：在状态 $c$ 下选择动作 $u$ 后，最终结果的期望。
+
+这两个模型各自补偿一种偏差：
+
+- 动作选择概率模型把罕见动作的样本适当加权，修正日志策略偏好；
+- 结果预测模型利用状态特征降低方差，并为局部样本提供平滑估计。
+
+#### 为什么要交叉拟合
+
+数据按任务或代码仓库分成 $K$ 份。给某一份轨迹打信用时，两个辅助模型只能在其余 $K-1$ 份上训练。不能按片段随机切分，因为同一轨迹中的所有片段共享最终结果；如果同一任务同时出现在训练侧和评分侧，模型很容易记住任务成败，产生虚假的高置信度。
+
+#### 双重稳健估计
+
+对状态组 $c$ 中动作 $u$ 的价值，使用：
 
 $$
 \hat V(u,c)=\frac{1}{|I(c)|}\sum_{k\in I(c)}
@@ -338,413 +494,512 @@ $$
 \right].
 $$
 
-contrast $\hat\Delta(u,c)$ 使用与 estimand 相同的 observed-alternative mixture。Cross-fitting 防止某个 segment 被在它自身 task outcome 上训练过的 nuisance models 评分。由于同一 trajectory 中所有 segments 共享 terminal outcome，standard errors 与 bootstrap resampling 需要按 task cluster。
+不看公式也可以把它理解为：
 
-在 overlap 和 sequential ignorability 成立时，若 propensity model 或 outcome model 任一正确指定，doubly robust estimator 就是一致的。这种保护**不能**消除 hidden confounding，也不能修复无效的 action abstraction。
+> 先由结果模型预测“这个动作通常会得到什么结果”，再用日志中真正执行过该动作的样本，对预测误差进行按选择概率加权的纠正。
 
-#### Support gates
+在动作可比、重要混杂因素已记录的前提下，动作选择概率模型或结果预测模型只要有一个估计正确，最终估计仍有机会保持一致，因此称为“双重稳健”。但它不能消除未记录的隐藏信息，也不能挽救错误的状态分组。
 
-初始保守默认值，后续在 pilot 中校准：
+#### 样本支持门槛
 
-- 每个被比较 action 满足 $\hat e(u\mid c)\ge 0.05$；
-- inverse-propensity effective sample size 至少为 20；
-- 可能时，pooled support cell 至少由两个 behavior-policy sources 贡献；
-- 单个 task 贡献不超过 local weight 的 10%。
+为了避免在几乎没有对照数据的地方外推，初始实验可以采用以下保守门槛：
 
-如果 gate 失败，interval 设为 vacuous range $[-1,1]$，而不是 extrapolate。
+- 每个待比较动作的估计选择概率不低于 $0.05$；
+- 经逆概率加权后的有效样本量不少于 20；
+- 条件允许时，一个状态组至少包含两个不同日志策略产生的数据；
+- 单个任务对局部估计的权重不超过 10%。
 
-### 3.7 Step 5: 生成 sensitivity-aware credit intervals
+任一门槛不满足，就把信用区间设为完整的不确定范围 $[-1,1]$，表示拒绝判断。实际阈值应通过预实验校准，并在论文中报告阈值变化下的结果。
 
-对每个 supported segment，使用以下信息构造 $[L_{i,j},U_{i,j}]$：
+### 3.11 第六步：从单点分数变成信用区间
 
-1. task-clustered bootstrap uncertainty；
-2. 对被选择 segment classes 的 simultaneous max-$t$ correction；
-3. matched semantic neighbors 之间的 disagreement；
-4. odds-ratio hidden-confounding sensitivity parameter $\Gamma$。
+即使得到 $\hat\Delta$，也不应直接按照正负号训练，因为小样本波动可能让符号翻转。CPCD 为每个片段构造信用区间：
 
-报告 $\Gamma\in\{1,1.25,1.5,2\}$；只有在 held-out calibration pilot 后，才把 $\Gamma=1.5$ 作为预注册主设定。若结果在 $\Gamma=1.25$ 时就消失，应描述为 fragile observational evidence。
+$$
+[L_{i,j},U_{i,j}].
+$$
 
-interval 有三种状态：
+区间综合四类不确定性：
 
-| Interval | 解释 | 允许的训练用途 |
+1. **任务级重采样误差**：以任务为单位进行自助重采样，而不是把同一轨迹中的片段当成独立样本；
+2. **多重比较修正**：同时给大量片段打分时，控制“总会碰巧选中一些假阳性”的问题；
+3. **相近样本分歧**：相似状态中的结果越不一致，区间越宽；
+4. **隐藏因素敏感性**：假设存在一定强度的未记录因素，检查结论是否仍然保持正负方向。
+
+用 $\Gamma$ 表示隐藏因素可能改变动作选择优势比的程度。建议报告 $\Gamma\in\{1,1.25,1.5,2\}$ 下的全部结果。直观地说：
+
+- $\Gamma=1$ 表示暂不额外考虑隐藏因素；
+- $\Gamma$ 越大，允许的隐藏偏差越强，信用区间也越保守；
+- 如果一个正向结论在 $\Gamma=1.25$ 时就消失，只能称为脆弱的观察性证据。
+
+最终分类规则为：
+
+| 信用区间 | 结论 | 训练用途 |
 |---|---|---|
-| $L>0$ | 在指定 support/sensitivity model 下可靠为正 | 若也 grounded，则用于 weighted SFT |
-| $U<0$ | 可靠为负 | 只有存在正向 observed alternative 时才构造 preference against it |
-| $L\le 0\le U$ | 模糊或 unsupported | 仅作为 context；mask semantic action/reasoning loss |
+| $L>0$ | 即使考虑误差后仍可靠为正 | 通过事实依据检查后，进入加权 SFT |
+| $U<0$ | 即使考虑误差后仍可靠为负 | 有可靠正向对照时，构造 DPO 偏好对 |
+| $L\le 0\le U$ | 正负无法确定 | 只保留上下文，不计算该片段的模仿损失 |
 
-### 3.8 Step 6: 将 groundedness 与 utility 分离
+区间机制是 CPCD 与普通步骤打分器的重要区别。普通打分器会把 $0.01$ 和 $0.8$ 都标为正向；CPCD 会问：考虑采样误差和隐藏偏差后，这个正号还站得住吗？
 
-高 outcome correlation 仍可能奖励缺乏证据的猜测。使用以下信息计算 prefix-only groundedness score $g_{i,j}\in[0,1]$：
+### 3.12 第七步：分别计算事实依据度和来源链流量
 
-- tool/schema validity；
-- 与先前 environment observations 的一致性；
-- emitted claims 的 evidence entailment；
-- 不含 future/reference leakage；
-- 可用时的 local state-effect verification。
+仅仅与成功相关还不够。一个没有证据的猜测可能碰巧成功，所以还需要两个独立检查。
 
-独立地，计算 provenance flow $\rho_{i,j}\in[0,1]$：从 verified milestones 和 terminal output 出发，沿 source-to-use paths 向后路由 normalized mass。primary version 中，没有通向任何 verified milestone 的 segment 得到 $\rho=0$。Infrastructure tokens 由一个小的 schema anchor 单独保护。
+#### 事实依据度
 
-这种分解区分两个问题：
+记事实依据度为 $g_{i,j}\in[0,1]$。它衡量动作在当时是否有充分依据，依据包括：
 
-- **该 action 是否由当时可用信息支持？** $g$
-- **logged evidence 是否表明它改善了最终结果？** $[L,U]$
+- 工具调用格式和参数是否合法；
+- 动作是否与此前可见的环境观察一致；
+- 片段中的声明能否由此前证据支持；
+- 是否没有偷看未来观察、参考答案或标准补丁；
+- 如果有局部验证器，动作是否产生了所声称的状态变化。
 
-### 3.9 Step 7: 将 credit 编译为 SFT 与 preference targets
+例如，模型在没有读取代码时直接猜中一个修复，最终也可能成功，但它的事实依据度应较低，避免训练模型复制这种不可复现的猜测。
 
-对可靠正向 segment：
+#### 来源链流量
+
+记来源链流量为 $\rho_{i,j}\in[0,1]$。计算时从最终成功和已验证里程碑出发，沿来源链反向分配权重：
+
+- 修复动作得到来自“测试通过”节点的权重；
+- 支持修复的代码观察得到一部分权重；
+- 保存并在之后取回该观察的记忆操作也得到一部分权重；
+- 与任何已验证结果都没有路径连接的无关搜索，来源链流量为零。
+
+来源链流量解决的是长时延问题：一个早期片段即使距离最终结果几十轮，只要它沿着“产生—保存—取回—使用”的路径到达结果，仍然可以获得权重。
+
+事实依据度和信用区间回答的是不同问题：
+
+- $g$：这个动作在执行当时是否有证据支持？
+- $[L,U]$：跨轨迹结果是否表明它比替代动作更有用？
+- $\rho$：它是否沿一条可追溯路径参与了后续已验证结果？
+
+只有三者配合，才能避免奖励“碰巧成功但无依据”或“看起来合理但没有实际作用”的动作。
+
+### 3.13 第八步：把信用结果转换成训练目标
+
+#### 正向片段：加权 SFT
+
+对可靠正向片段，训练权重为：
 
 $$
-w_{i,j}=\min(c_{\max},\max(0,L_{i,j}))\,g_{i,j}\rho_{i,j},
+w_{i,j}=
+\min(c_{\max},\max(0,L_{i,j}))
+\cdot g_{i,j}\cdot \rho_{i,j}.
 $$
 
-其中 $c_{\max}$ 是 training split 上 positive lower bounds 的 95th percentile。对每条 trajectory 的总权重做 normalize 或 cap，避免长轨迹主导。
+这里使用区间下界 $L$，而不是点估计值，体现保守原则。$c_{\max}$ 用于截断少数异常大的权重，可以设为训练集中正向下界的第 95 百分位。
 
-对可靠负向 segment $z^-$，只有当同一 support cell 中存在 grounded positive alternative $z^+$ 时，才创建 preference pair。Pair construction 只在两种情况下允许：两个 alternatives 来自完全相同的 restorable state，或 verified schema 能在同一个 canonical prompt 下渲染两者。仅有 semantic similarity 不足以构成有效 DPO pair。
-
-Pair loss 为
+正向 SFT 损失为：
 
 $$
-\mathcal L_{\mathrm{pair}}=-\log\sigma\left(
+\mathcal L_{\text{正向 SFT}}
+=-\sum_{i,j}w_{i,j}
+\log\pi_\theta(z_{i,j}\mid h_{i,j}).
+$$
+
+每条轨迹的总权重还应归一化或设置上限，防止一条 200 轮轨迹仅仅因为词元多，就比十条 20 轮轨迹产生更大的梯度。
+
+#### 负向片段：有真实对照时才做 DPO
+
+对于可靠负向片段 $z^-$，只有满足以下条件才构造偏好对：
+
+1. 同一可比较状态组中存在一个可靠正向片段 $z^+$；
+2. 两个动作来自完全相同的可恢复状态，或者能通过经过验证的状态模板还原成同一个输入；
+3. 正向动作同样通过事实依据检查；
+4. 正负差异不是由未来信息或教师特权信息造成的。
+
+仅仅“语义看起来相似”不足以组成偏好对。主实验也不应让大模型凭空写一个“更好的动作”，因为这样会把研究问题从离线信用归因变成教师数据合成。
+
+偏好损失可以使用标准 DPO：
+
+$$
+\mathcal L_{\text{偏好}}
+=-\log\sigma\left(
 \beta\left[
-\log\frac{\pi_\theta(z^+\mid h)}{\pi_{\mathrm{ref}}(z^+\mid h)}-
-\log\frac{\pi_\theta(z^-\mid h)}{\pi_{\mathrm{ref}}(z^-\mid h)}
+\log\frac{\pi_\theta(z^+\mid h)}{\pi_{\mathrm{ref}}(z^+\mid h)}
+-\log\frac{\pi_\theta(z^-\mid h)}{\pi_{\mathrm{ref}}(z^-\mid h)}
 \right]\right).
 $$
 
-primary experiment 中，不要仅凭 judge 合成一个“更好” action。如果没有 observed positive alternative，就 mask 负向 segment，而不是使用 unlikelihood training。
+如果没有可靠正向对照，负向片段只做目标遮蔽，不使用反似然损失，也不合成替代答案。
 
-完整目标为
+#### 不确定片段：上下文保留，目标遮蔽
 
-$$
-\mathcal L_{\mathrm{CPCD}}=
-\mathcal L_{\mathrm{positive\text{-}SFT}}
-+\lambda_{\mathrm{pair}}\mathcal L_{\mathrm{pair}}
-+\lambda_{\mathrm{schema}}\mathcal L_{\mathrm{schema}}.
-$$
+不确定片段可能是理解后续行为必需的历史。例如，错误修改必须留在上下文里，模型才能学习后面的回滚；但保留为上下文不等于鼓励模型生成它。因此输入中保留该片段，标签位置设为忽略，不计算模仿损失。
 
-使用 $\lambda_{\mathrm{schema}}=0.05$ 作为 formatting、tool schema 与 mandatory control tokens 的初始 anchor；在 $\{0,0.05,0.1\}$ 中调参。正向但 ungrounded/privileged segments 与 ambiguous segments 保留在输入 context 中，但不获得 semantic target loss。
+#### 基础格式锚点
 
-### 3.10 算法草图
-
-```text
-Input: frozen logs D, terminal outcomes, tool metadata
-
-1. Split by task/repository into K folds.
-2. For each trajectory:
-   a. segment tool, memory, edit/test, and decision episodes;
-   b. build deterministic provenance edges;
-   c. add prefix-only semantic support/use edges;
-   d. derive state representation c and semantic action u.
-3. For each held-out fold:
-   a. fit propensity e(u|c) and outcome Q(c,u) on other folds;
-   b. audit semantic action equivalence;
-   c. estimate doubly robust contrasts on the held-out fold;
-   d. compute clustered, simultaneous, sensitivity-aware [L, U].
-4. Compute prefix-groundedness g and provenance flow rho.
-5. Compile examples:
-   a. L > 0 and grounded -> weighted SFT;
-   b. U < 0 plus observed positive alternative -> DPO pair;
-   c. otherwise -> context-only masked segment.
-6. Cap loss mass per trajectory and train the policy.
-7. At evaluation, discard all credit models and run the policy normally.
-```
-
-### 3.11 能保证什么
-
-如果 simultaneous intervals 在 family-wise level $\alpha$ 下有效，并且只在 interval 排除 0 时更新，那么在因果假设成立的条件下：
+工具调用格式、必需的控制词元和环境协议不一定直接连接到任务成功，但模型仍必须学会。为这些基础部分单独保留一个很小的格式损失：
 
 $$
-\Pr(\text{any selected segment has the wrong true sign})\le \alpha.
+\mathcal L_{\mathrm{CPCD}}
+=
+\mathcal L_{\text{正向 SFT}}
++\lambda_{\text{偏好}}\mathcal L_{\text{偏好}}
++\lambda_{\text{格式}}\mathcal L_{\text{格式}}.
 $$
 
-这是一个保守的 **sign-selection guarantee**，不是精确 causal-effect recovery 或 downstream policy improvement 的保证。如果 support representation 遗漏重要 confounders、semantic action classes 不一致，或 interval procedure 未校准，这个保证会失效。
+$\lambda_{\text{格式}}$ 可以从 $0.05$ 开始，并在 $\{0,0.05,0.1\}$ 中调节。这个锚点只保护格式和协议，不应用来重新监督所有语义动作。
 
-### 3.12 Practical MVP 与 full version
+### 3.14 把运行示例完整走一遍
 
-#### CPCD-Lite: 第一篇 paper-quality pilot
+回到登录令牌修复任务。经过上述步骤，可以得到：
 
-- 只使用 deterministic tool/memory provenance。
-- 为 ALFWorld/WebShop 或 tau-bench 使用 hand-specified action classes。
-- 要求 exact task/milestone support cells。
-- 拟合 cross-fitted logistic propensity 与 outcome models。
-- 使用 task bootstrap intervals 与 overlap abstention。
-- 训练 positive weighted SFT；只有在 positive-credit calibration 成功后再加入 DPO。
+| 片段 | 跨轨迹比较 | 来源链 | 最终处理 |
+|---|---|---|---|
+| 运行失败测试 | 多条成功和失败轨迹都出现；能确定当前错误 | 产生失败信息，支持后续诊断 | 若区间下界为正，进入加权 SFT |
+| 查看认证日志 | 在相似状态中通常提高后续修复成功率 | 日志内容被后续代码定位使用 | 正向 SFT |
+| 阅读配置文件 | 样本少，不能确定有用还是有害 | 没有连接到通过的测试 | 只保留上下文 |
+| 修改超时参数 | 相同错误状态下，明显差于修改时区转换 | 修改未使测试通过 | 有正向对照时作为 DPO 的负例 |
+| 两次无关搜索 | 与成功相关，但成功轨迹不一定需要它 | 没有证据流向最终修复 | 只保留上下文，不因轨迹成功而奖励 |
+| 阅读令牌解析代码 | 在多条轨迹中支持正确修复 | 观察被记忆并用于后续修改 | 即使相隔很多轮，也进入正向 SFT |
+| 修复时区转换 | 同状态下显著优于修改超时参数 | 直接使相关测试通过 | 正向 SFT，并作为偏好对的正例 |
 
-这个版本可以测试核心 claim，而不依赖 learned graph encoder 或大型 LLM judge。
+这个例子体现了四个关键性质：
 
-#### CPCD-Full: long-horizon extension
+1. 成功轨迹中的无关步骤不会自动得到正向信用；
+2. 失败轨迹中的诊断步骤可以被保留下来学习；
+3. 负向训练必须有日志中真实存在的更好动作作为对照；
+4. 早期证据只要沿来源链被后续使用，就不会因为距离远而丢失信用。
 
-- 加入 prefix-only semantic provenance extraction。
-- 使用 task-clustered cross-fitting 学习 state/action embeddings。
-- 加入 hidden-confounding sensitivity intervals。
-- 包含 memory write/retrieve/update 与 evidence source/use episodes。
-- 加入 observed-pair negative preference training。
-- 扩展到 SWE 与 frozen-corpus deep research。
+### 3.15 完整算法
 
-### 3.13 预期 failure modes 与内置响应
+    输入：冻结轨迹集合 D、每条轨迹的最终结果、工具与环境元数据
 
-| Failure mode | Diagnostic | Response |
+    1. 按任务或代码仓库把 D 划分为 K 份。
+    2. 对每条轨迹：
+       a. 切分工具、记忆、修改/测试和决策片段；
+       b. 根据确定性元数据建立来源链边；
+       c. 用只看当前前缀的语义提取器补充“支持/使用”边；
+       d. 为每个片段提取可比较状态 c 和语义动作 u。
+    3. 对每一份留出数据：
+       a. 在其余 K-1 份上拟合动作选择概率模型和结果模型；
+       b. 检查语义动作类别是否过粗；
+       c. 用双重稳健估计计算动作相对信用；
+       d. 以任务为单位估计误差，并生成考虑隐藏因素的 [L,U]。
+    4. 计算每个片段的事实依据度 g 和来源链流量 rho。
+    5. 编译训练数据：
+       a. L > 0 且有事实依据、有来源链 -> 加权 SFT；
+       b. U < 0 且有可靠正向对照 -> DPO 偏好对；
+       c. 其余情况 -> 保留上下文，遮蔽目标。
+    6. 限制每条轨迹的总损失权重，训练智能体策略。
+    7. 评估时丢弃所有信用估计组件，像普通智能体一样运行策略。
+
+### 3.16 建议的实现顺序
+
+#### CPCD-Lite：先验证核心想法
+
+第一版不需要训练复杂图模型，也不需要大型语言模型评审器：
+
+- 只使用工具编号、文件路径、测试编号和记忆来源编号建立确定性来源链；
+- 在 ALFWorld、WebShop 或 tau-bench 中手工定义语义动作类别；
+- 使用严格的任务状态和已完成里程碑构造可比较状态组；
+- 使用交叉拟合的逻辑回归估计动作选择概率和结果；
+- 以任务为单位生成信用区间；
+- 先只训练可靠正向片段；
+- 只有正向信用通过干预实验校准后，再加入负向 DPO。
+
+这个版本已经能检验最核心的主张：保守选择的片段是否真的比完整 SFT、随机遮蔽和基于大模型“重要性”判断的选择方法更准确、更有效。
+
+#### CPCD-Full：扩展到真正的长时程任务
+
+核心想法验证通过后，再逐项加入：
+
+- 只看当前前缀的语义来源链提取；
+- 学习得到的状态和动作表示；
+- 隐藏因素敏感性区间；
+- 记忆写入、更新、删除、取回以及证据使用节点；
+- 基于真实对照的负向偏好训练；
+- 软件工程和冻结检索语料上的深度研究任务。
+
+不建议一开始就同时加入所有组件，否则即使最终性能提高，也很难知道收益来自信用归因、语言模型评审器、额外数据清洗，还是简单的词元减少。
+
+### 3.17 能保证什么，不能保证什么
+
+如果信用区间经过正确校准，并且只选择区间完全位于零一侧的片段，那么在状态可比、动作含义稳定、重要混杂因素已被控制的前提下，可以控制“被选片段中至少有一个正负符号判断错误”的概率：
+
+$$
+\Pr(\text{至少一个被选片段的真实信用符号判断错误})\le \alpha.
+$$
+
+这只是一个**正负符号选择保证**，不是以下保证：
+
+- 不是每个动作真实因果贡献的精确恢复；
+- 不是新策略一定提升的理论保证；
+- 不是对日志之外全新动作的价值估计；
+- 不是对未记录隐藏信息的彻底消除；
+- 不是来源链本身构成因果证明。
+
+只要状态表示漏掉重要因素、语义动作合并了不同干预，或区间校准失败，上述保证就可能失效。因此论文中更稳妥的表述应是“有敏感性边界的观察性效用信用”，并用只在评估阶段进行的中间状态分支实验检验其真实性。
+
+### 3.18 预期失败情形与处理办法
+
+| 失败情形 | 怎样发现 | 应怎样处理 |
 |---|---|---|
-| 每个 state 只有一个 action | Low propensity/ESS | Abstain；在声称 offline CA 前收集更多样的 log set |
-| State abstraction 合并了不兼容 histories | High within-class next-state disagreement | 拆分 class 或让 interval vacuous |
-| Teacher-only hidden information | Credit 在 policy-ID 或 $\Gamma$ sensitivity 下崩溃 | 排除 privileged traces，或单独报告 privileged variant |
-| Provenance extractor 使用未来证据 | Prefix-leakage audit | 拒绝 edge 并重新标注 |
-| 长成功轨迹主导 | Per-task gradient mass imbalance | 按 trajectory cap 与 normalize loss mass |
-| Negative credit 没有更好 action | No supported positive pair | 只 mask；不要 hallucinate preference target |
-| Tuning 后 policy 离开 logged support | OOD action/state rate rises | 更强 SFT anchor、保守 decoding，或把 iterative data collection 作为独立 semi-online extension |
+| 同一状态只有一种动作 | 动作选择概率接近 1，缺少替代样本 | 拒绝判断；若要继续研究，需另行采集更有多样性的日志 |
+| 状态表示合并了不兼容历史 | 同类动作后的环境变化分歧很大 | 拆分状态组；仍无法稳定拆分时扩大为完全不确定区间 |
+| 教师使用了学生看不到的信息 | 信用结论随教师身份或 $\Gamma$ 略微变化就崩溃 | 排除这类轨迹，或作为“使用特权信息”的独立版本报告 |
+| 来源链提取器偷看未来 | 前缀泄漏检查发现边依赖后续答案或标准补丁 | 删除该边并重新提取；主实验只允许看当前及以前内容 |
+| 长成功轨迹主导梯度 | 单条轨迹贡献的损失权重远高于其他轨迹 | 对每条轨迹的总权重归一化并设置上限 |
+| 负向片段没有可靠的更好动作 | 找不到同状态的正向对照 | 只遮蔽目标，不凭空合成偏好正例 |
+| 微调后策略离开日志覆盖范围 | 新策略产生大量训练日志中未见的状态或动作 | 增强基础 SFT 锚点、使用保守解码；新一轮数据采集应作为半在线扩展单独研究 |
+| 来源链过稀 | 大量真正有用片段无法连接到里程碑 | 先改善日志元数据；语义补边必须通过前缀限制和人工抽检 |
+| 来源链过密 | 几乎所有早期片段都连接到结果 | 提高边的证据门槛，并通过随机打乱边的对照实验检查来源链是否有信息量 |
 
 ---
 
 ## 4. 实验计划
 
-### 4.1 Research questions
+### 4.1 研究问题
 
-1. **RQ1: credit validity.** Offline intervals 能否预测 evaluation-only intervention effects 的符号与排序？
-2. **RQ2: policy value.** 在相同 data、token 与 compute budgets 下，certified selective training 是否提升 task success？
-3. **RQ3: long-horizon value.** 对 source-to-use distance 长、memory operations 多、超过 50 或 100 turns 的 trajectories，provenance 是否更重要？
-4. **RQ4: failure reuse.** 从 failed traces 中提取的有用 segments 是否负责 OOD/hard-task gains？
-5. **RQ5: conservatism.** 随着 overlap、confidence 与 $\Gamma$ thresholds 变化，precision/coverage trade-off 如何？
+1. **信用是否准确**：离线估计的信用区间，能否预测只在评估阶段执行的中间状态干预效果的正负和大小排序？
+2. **是否真正改善策略**：在数据量、监督词元和计算量相同的条件下，经过保守筛选的训练是否提高任务成功率？
+3. **是否对长时程任务更有价值**：轨迹越长、证据产生与使用之间距离越远、记忆操作越多，来源链带来的收益是否越明显？
+4. **能否复用失败轨迹**：从失败轨迹中识别出的正向片段，是否能提升困难任务和分布外任务的表现？
+5. **保守程度是否合理**：随着可比较样本门槛、置信门槛和隐藏因素敏感性参数变化，信用精度与可用数据覆盖率怎样权衡？
 
-### 4.2 Benchmark stack
+### 4.2 分阶段评测基准
 
-使用分阶段 stack；在证明 credit labels 有意义之前，不要从最昂贵的 SWE 设定开始。
+实验应分阶段推进。在证明信用标签确实有意义之前，不宜直接从成本最高的软件工程任务开始。
 
-| 阶段 | 领域与 split | 为什么需要 | Proposed frozen log construction | Primary evaluation |
+| 阶段 | 领域与数据划分 | 选择原因 | 冻结日志的构造方式 | 主要评估 |
 |---|---|---|---|---|
-| A: controlled attribution | ALFWorld + WebShop | Restorable states 与多个 alternatives 让 intervention credit 可测 | 每个 training task 从多个 checkpoints/temperatures 采样 16-32 条 trajectories，然后 freeze | Success；held-out branch points 上的 intervention sign/precision |
-| B: structured tool agent | tau-bench retail，然后 tau2-bench | 真实 tool schemas、business state、mixed recoveries、中等 horizon | 每个 task 从 base/SFT/teacher mixtures 采样 8-16 条 trajectories | Task accuracy、policy violations、turns、credit risk-coverage |
-| C: true long horizon | SWE-Gym logs -> SWE-bench Verified | Repository state、延迟 edit/test effects、50-100+ turn traces | 成本允许时每个 issue 4-8 条多样 trajectories；只 pool 经过 audit 的 semantic cells | Pass@1、cost、turns、tests passed、horizon-stratified credit |
-| D: optional deep research | OpenResearcher-style frozen corpus -> BrowseComp-Plus/GAIA | Evidence provenance、citations、bounded context、100+ calls | Frozen search corpus 与 source-indexed logs；不依赖 live web | Answer accuracy、citation support、source-to-use distance |
+| A：受控归因 | ALFWorld + WebShop | 环境状态可恢复，且容易在同一状态尝试多个动作 | 每个训练任务使用多个模型检查点和采样温度生成 16—32 条轨迹，然后冻结 | 任务成功率；留出分支点上的信用符号准确率 |
+| B：结构化工具智能体 | tau-bench retail，然后 tau2-bench | 有真实工具格式、业务状态、失败恢复和中等长度轨迹 | 每个任务由基础模型、SFT 模型和教师模型混合生成 8—16 条轨迹 | 任务准确率、规则违反率、轮数、信用风险—覆盖率 |
+| C：真正长时程 | SWE-Gym 日志 → SWE-bench Verified | 有仓库状态、延迟的修改/测试效果，以及 50—100 轮以上轨迹 | 成本允许时，每个问题生成 4—8 条多样轨迹；只合并通过审计的语义状态组 | Pass@1、成本、轮数、通过测试数、按轨迹长度分层的信用指标 |
+| D：可选深度研究 | OpenResearcher 风格冻结语料 → BrowseComp-Plus/GAIA | 有证据来源、引用、有限上下文和 100 次以上工具调用 | 使用冻结检索语料和带来源编号的日志，不依赖实时网页 | 答案准确率、引用支持率、证据产生到使用的距离 |
 
-家庭/网页/客服任务使用 task-level splits；SWE 使用 repository-level splits。Near-duplicate tasks、issue variants 与来自同一 environment seed 的 trajectories 必须留在同一个 split。
+家庭/网页/客服任务按任务划分训练集和测试集；SWE 按代码仓库划分。近似重复任务、同一问题的变体，以及来自同一环境随机种子的轨迹必须位于同一个数据分区。
 
-### 4.3 Offline log design
+### 4.3 离线日志设计
 
-研究质量更依赖 behavior diversity，而不是原始 trajectory 数量。冻结 corpus 应来自：
+研究质量更依赖**行为多样性**，而不只是轨迹总数。冻结日志应尽量来自：
 
-- base model、一个 SFT checkpoint，以及至少一个更强 teacher；
-- 两到三个 sampling temperatures；
-- successful、failed 与 recovered trajectories；
-- 显式 policy/checkpoint identifiers，并在可能时记录 action log-probabilities。
+- 一个基础模型、一个 SFT 检查点，以及至少一个更强的教师模型；
+- 两到三个采样温度；
+- 成功、失败和失败后恢复成功的轨迹；
+- 明确的策略或检查点编号，并尽可能记录动作对数概率。
 
-在拟合任何 credit model 前冻结 logs。Primary CPCD training run 不进行环境调用。State restoration 与 branching 仅限 held-out credit-evaluation set。
+在拟合任何信用模型之前冻结全部日志。CPCD 主实验在训练期间不调用环境；状态恢复和中间分支只用于留出的信用评估集。
 
-分别评估四种数据设定：
+分别评估四种数据条件：
 
-1. 只有 expert successes；
-2. mixed expert successes and failures；
-3. heterogeneous base/SFT/teacher logs；
-4. cross-policy transfer，即从 credit estimation 中 held out 一个 behavior source。
+1. 只有专家成功轨迹；
+2. 同时包含专家成功和失败轨迹；
+3. 混合基础模型、SFT 模型和教师模型的异质日志；
+4. 跨策略迁移：信用估计时完整留出某一种日志策略，检验是否能迁移到未参与估计的行为来源。
 
-### 4.4 Baselines
+### 4.4 对比基线
 
-#### Strict-offline 与 SFT baselines
+#### 严格离线和 SFT 基线
 
-| Baseline | 控制的问题 |
+| 基线 | 它控制的问题 |
 |---|---|
-| Full-trajectory SFT | 任意 selection 是否能超过标准 imitation？ |
-| Success-only RFT/SFT | 使用 failed data 是否真的有用？ |
-| Reward-weighted SFT | within-trajectory credit 是否优于 trajectory weighting？ |
-| Same-token random mask | 收益是否只是 regularization 或 supervised tokens 变少？ |
-| Perplexity/entropy mask | causal structure 是否优于 model uncertainty？ |
-| Explicit tool-error mask / SWE-Lego recipe | CPCD 是否超过显而易见的 error removal？ |
-| ATLaS-style critical-step selector | outcome-supported credit 是否优于 LLM-perceived importance？ |
-| STeP/EEF-style masks or segment mining | calibrated signed credit 是否优于 heuristic reflection/failure reuse？ |
-| AWR or Q-SFT | interval selection 是否优于 scalar value weighting？ |
-| HPL | provenance-aware support 是否优于单纯 multi-scale preference？ |
-| Agentic-DPO | 使用 outcomes、failures 与 abstention 是否优于 expert-state one-step preferences？ |
+| 完整轨迹 SFT | 任意片段选择是否都能超过标准模仿学习？ |
+| 仅成功轨迹的 RFT/SFT | 使用失败数据是否真的有额外价值？ |
+| 按轨迹奖励加权的 SFT | 轨迹内信用是否优于只给整条轨迹统一权重？ |
+| 相同词元数量的随机遮蔽 | 收益是否只是正则化或监督词元减少？ |
+| 困惑度/熵遮蔽 | 因果结构是否比模型自身的不确定度更有用？ |
+| 显式工具错误遮蔽 / SWE-Lego | CPCD 是否超过容易识别的格式或工具错误清洗？ |
+| ATLaS 风格关键步骤选择 | 有最终结果支持的信用是否优于大模型主观判断的重要性？ |
+| STeP/EEF 风格遮蔽或片段挖掘 | 经校准的正负信用是否优于启发式反思和失败复用？ |
+| AWR 或 Q-SFT | 区间选择是否优于单一价值分数加权？ |
+| HPL | 来源链和样本支持度是否优于单纯的多尺度偏好？ |
+| Agentic-DPO | 利用结果、失败和拒绝判断，是否优于只比较专家状态下的一步动作？ |
 
-#### Upper bounds 与 diagnostic controls
+#### 上界和诊断对照
 
-- 遵循 IPR/CSO 思路的 evaluation-only Monte Carlo branch credit；
-- 从 branch effects 得到的 oracle mask；
-- 当 reference patches 与 tests 可用时，在 SWE 上使用 P2T；
-- 不使用 provenance 的 flat-history doubly robust estimation；
-- 在存在可实现 instrument 时使用 DML-IL-inspired history representation。
+- 按 IPR/CSO 思路，只在评估时从中间状态进行蒙特卡洛分支；
+- 直接根据分支干预效果得到的理想片段遮蔽；
+- 标准补丁和测试可用时，在 SWE 上使用 P2T；
+- 不使用来源链、只使用平铺历史的双重稳健估计；
+- 存在合理工具变量时，使用 DML-IL 风格历史表示。
 
-Semi-online methods 是 upper bounds，不是严格 apples-to-apples offline baselines。
+半在线方法只作为性能上界，不应与严格离线基线直接作同等条件比较。
 
-### 4.5 直接 credit evaluation
+### 4.5 直接评估信用是否正确
 
-对每个领域 300-500 个 held-out branch points：
+每个领域选择 300—500 个留出的中间分支点：
 
-1. 在 segment 之前恢复环境；
-2. 执行 logged semantic action 和一个或多个 observed alternative classes；
-3. 使用同一个 fixed continuation policy 继续 $K=16$ 次 stochastic rollouts；
-4. 估计 intervention contrast $\Delta^{\mathrm{branch}}$ 及其 uncertainty；
-5. 绝不把这些 branch outcomes 回灌给 offline credit estimator。
+1. 在目标片段之前恢复环境；
+2. 分别执行日志中的语义动作和一个或多个日志中出现过的替代动作；
+3. 使用同一个固定后续策略，各自继续随机运行 $K=16$ 次；
+4. 估计动作干预差值 $\Delta^{\mathrm{branch}}$ 及其不确定性；
+5. 这些分支结果绝不能回流到离线信用估计器中。
 
-这测量的是 CPCD 使用的同一个 natural-continuation estimand。在 SWE 中，恢复 container snapshot，并且只在 state effects 可 replay 的 actions 上 branch。在 deep research 中，使用 frozen document corpus 避免 live-web non-stationarity。
+这样测量的正是 CPCD 所定义的“自然延续价值”。SWE 中应恢复容器快照，而且只在状态效果可重放的动作上分支。深度研究任务应使用冻结文档库，避免实时网页变化造成干扰。
 
-主要 credit metrics：
+主要信用指标包括：
 
-- positive 与 negative credit 的 sign precision and recall；
-- 10%、30%、50% coverage 下的 causal precision；
-- area under the risk-coverage curve；
-- 与 branch-effect magnitude 的 Spearman correlation；
-- interval coverage 与 average interval width；
-- successful traces 中 harmful steps 被错误奖励的比例；
-- failed traces 中 helpful steps 被错误抑制的比例；
-- 按 trajectory length 与 source-to-use distance 分层的 metrics。
+- 正向和负向信用的符号精确率与召回率；
+- 覆盖 10%、30%、50% 片段时的因果精确率；
+- 风险—覆盖率曲线下面积；
+- 与真实分支效果大小的 Spearman 等级相关；
+- 信用区间的覆盖率和平均宽度；
+- 成功轨迹中有害步骤被错误奖励的比例；
+- 失败轨迹中有用步骤被错误抑制的比例；
+- 按轨迹长度和证据产生—使用距离分层的指标。
 
-主 endpoint 应是**预注册 useful coverage 下的 precision**，而不是在 ambiguous steps 占多数的数据集上报告 accuracy。
+主要终点应预先注册为“指定有效覆盖率下的精确率”，不能只在大量步骤本来就含糊的数据集上报告总体准确率。
 
-### 4.6 Downstream policy evaluation
+### 4.6 评估训练后的策略
 
-报告：
+需要同时报告：
 
-- Success@1 / Pass@1，以及次要的 Pass@k；
-- turns、generated tokens、tool calls、wall time 与 dollar-equivalent environment cost；
-- invalid action/schema rate 与 safety/policy violations；
-- hard-task 与 OOD generalization；
-- horizon bins `<20`、`20-50`、`50-100`、`>100` turns 上的表现；
-- supervised-token fraction 与每个 task 的 effective gradient mass；
-- post-training state/action OOD rate relative to the frozen corpus。
+- Success@1 或 Pass@1，以及作为次要指标的 Pass@k；
+- 交互轮数、生成词元、工具调用数、实际用时和折算后的环境成本；
+- 非法动作或工具格式错误率，以及安全和业务规则违反率；
+- 困难任务和分布外任务上的泛化能力；
+- 在少于 20 轮、20—50 轮、50—100 轮和超过 100 轮四个区间的表现；
+- 实际参与监督的词元比例，以及每个任务的有效梯度总量；
+- 训练后状态和动作相对于冻结日志的分布外比例。
 
-分别使用 equal raw tasks、equal supervised action-token count、equal optimizer FLOPs 三种比较。Selective method 不应因为训练 token 更少或 optimizer steps 更少而得到不公平 credit。
+至少做三种公平比较：原始任务数相同、监督动作词元数相同、优化器浮点计算量相同。选择性训练不能因为训练词元或更新步数更少而获得不公平优势。
 
-### 4.7 关键 ablations
+### 4.7 关键消融实验
 
-#### Attribution structure
+#### 归因结构
 
-- 移除 provenance，只使用 flat turn-recency/history features；
-- 随机置换 provenance edges，同时保持 node degree；
-- 使用 turn、fixed-length segment 与 semantic-segment units；
-- 移除 memory write/retrieve/update nodes；
-- 只用 deterministic edges vs deterministic plus semantic edges。
+- 移除来源链，只使用轮次距离和普通历史特征；
+- 随机打乱来源链边，但保持每个节点的连接数；
+- 比较按轮、固定长度片段和语义片段三种归因单位；
+- 移除记忆写入、取回和更新节点；
+- 比较仅使用确定性边与“确定性边加语义边”。
 
-#### Identification and uncertainty
+#### 可识别性和不确定性
 
-- 没有 intervals 的 point estimate；
-- no cross-fitting；
-- no propensity model；
-- no outcome model；
-- no overlap/ESS gate；
-- $\Gamma\in\{1,1.25,1.5,2\}$；
-- exact cells vs learned semantic matching；
-- same-policy vs mixed-policy logs。
+- 用单点估计替代信用区间；
+- 不使用交叉拟合；
+- 不使用动作选择概率模型；
+- 不使用结果预测模型；
+- 不设置动作重叠和有效样本量门槛；
+- 比较 $\Gamma\in\{1,1.25,1.5,2\}$；
+- 比较严格相同状态组与学习得到的语义匹配；
+- 比较单一策略日志与多策略混合日志。
 
-#### Training compiler
+#### 训练数据编译方式
 
-- positive SFT only；
-- negative DPO only；
-- no groundedness gate；
-- no provenance-flow weight；
-- no schema anchor；
-- no trajectory mass cap；
-- 用 point estimate $\hat\Delta$ 替代 lower bound $L$；
-- 在每个 task 内置换 $L$，同时保持其 histogram 与 total loss mass。
+- 只使用正向 SFT；
+- 只使用负向 DPO；
+- 不检查事实依据度；
+- 不使用来源链流量权重；
+- 不保留格式锚点；
+- 不限制单条轨迹的总损失权重；
+- 用点估计 $\hat\Delta$ 代替保守下界 $L$；
+- 在每个任务内部随机置换 $L$，同时保持权重分布和总损失不变。
 
-最后一个 permutation 是关键 falsifier：如果性能不变，说明 estimated credit values 没有发挥有效作用。
+最后一个随机置换是关键证伪实验：如果置换之后性能不变，说明估计出的信用值并没有真正发挥作用。
 
-### 4.8 Leakage 与 judge controls
+### 4.8 信息泄漏与评审器控制
 
-- Credit-model inputs 截止到 segment prefix；未来 observations 与 references 不可访问。
-- Reference patches/answers 只用于明确命名的 privileged baselines 或 held-out evaluation。
-- 任意 semantic extractor 在 policy training 前冻结，并在人类标注 edges 上 audit。
-- Credit-estimator folds、policy-training tasks 与 final evaluation tasks 互不重叠。
-- 在 stratified human sample 上校准 judge/groundedness labels，样本包括 successes with regressions 与 failures with good prefixes。
-- 报告 inter-annotator agreement 与 judge false-positive rates。
-- 记录所有 behavior-policy IDs，以测试“teacher identity”是否充当 hidden success label。
+- 信用模型只能看到目标片段结束时的历史，不能访问未来观察或参考答案；
+- 标准补丁和参考答案只用于明确标注的特权信息基线，或留出的最终评估；
+- 语义提取器必须在策略训练前冻结，并在人工标注的来源链边上审计；
+- 信用模型拟合任务、策略训练任务和最终评估任务互不重叠；
+- 在分层人工样本上校准评审器和事实依据标签，样本要同时包含“成功轨迹中的退步”和“失败轨迹中的好前缀”；
+- 报告标注者一致性和评审器假阳性率；
+- 记录所有日志策略编号，检查“教师身份”是否偷偷成为成功标签。
 
-### 4.9 Statistical protocol
+### 4.9 统计方案
 
-- 至少使用三个 policy-training seeds。
-- 以 task 而不是 segment 作为 independent unit。
-- 对 success differences 报告 paired task-bootstrap 95% confidence intervals。
-- 对 credit metrics 使用 cluster bootstrap，并校正少量 co-primary domain comparisons。
-- 预注册两个 co-primary endpoints：30% coverage 下的 causal precision，以及 equal supervised-token budget 下的 Success@1。
-- 根据 10% pilot 中观察到的 variance 决定最终 sample size；不要用 correlated segment counts 做 power calculation。
+- 策略训练至少使用三个随机种子；
+- 以任务而不是轨迹片段作为独立统计单位；
+- 对成功率差异报告配对任务自助法 95% 置信区间；
+- 对信用指标使用任务簇自助法，并校正少量共同主要领域的多重比较；
+- 预先注册两个共同主要终点：30% 覆盖率下的因果精确率，以及监督词元预算相同时的 Success@1；
+- 根据 10% 预实验中观察到的方差决定最终样本量，不能把彼此相关的片段数直接当成独立样本量。
 
-### 4.10 Resource plan
+### 4.10 资源计划
 
-以下是 planning bounds，不是 performance claims：
+以下只是规划范围，不是性能承诺：
 
-| Scope | Models/domains | Approximate budget |
+| 范围 | 模型和领域 | 估计预算 |
 |---|---|---|
-| MVP | 一个 4B model，ALFWorld/WebShop，CPCD-Lite，3 seeds | 12-20 H100-equivalent GPU-days 加 branch-evaluation environment time |
-| Main study | 4B 与 8B，controlled + tau-bench + SWE，full ablations | 60-90 H100-equivalent GPU-days |
-| Semantic annotation | Prefix-only edge/grounding extraction 与 human audit | paid-model usage 控制在约 USD 4K；质量足够时替换为 open model |
+| 最小试验 | 一个 4B 模型，ALFWorld/WebShop，CPCD-Lite，三个随机种子 | 12—20 个 H100 等价 GPU 天，另加分支评估的环境时间 |
+| 主实验 | 4B 与 8B，受控任务 + tau-bench + SWE，完整消融 | 60—90 个 H100 等价 GPU 天 |
+| 语义标注 | 只看前缀的来源链/事实依据提取及人工审计 | 付费模型费用控制在约 4000 美元；质量足够时替换为开放模型 |
 
-在投入完整研究前，先用 5% 数据 benchmark throughput 与 label cost。主要成本很可能是 branch-based evaluation 和 long-context SWE fine-tuning，而不是 doubly robust estimator。
+在投入完整实验前，先用 5% 数据测试吞吐量和标注成本。主要成本很可能是基于分支的信用评估和长上下文 SWE 微调，而不是双重稳健估计本身。
 
-### 4.11 Success 与 kill criteria
+### 4.11 成功标准与停止标准
 
-#### 支持该 idea 的证据
+#### 支持本研究设想的结果
 
-- controlled interventions 上，在 30% coverage 下 positive-sign precision 至少 80%；
-- 在两个 domains 上，相比 full SFT 和 same-token random masking，Success@1 可复现提升至少 3 absolute points；
-- 在 `>50`-turn 或 long source-to-use bucket 中，provenance ablation gap 更大；
-- 在匹配 token 与 compute budgets 后，failed-trace segments 仍有正向价值；
-- 随着 $\Gamma$ 增大，precision/coverage 行为平滑退化。
+- 在受控干预上，覆盖 30% 片段时，正向信用符号精确率至少达到 80%；
+- 在两个领域上，相比完整 SFT 和相同词元随机遮蔽，Success@1 可复现地提高至少 3 个百分点；
+- 在超过 50 轮或证据产生—使用距离较长的样本中，移除来源链造成的性能下降更大；
+- 控制监督词元和计算预算后，失败轨迹中的正向片段仍有价值；
+- 随着 $\Gamma$ 增大，精确率和覆盖率平滑下降，而不是突然崩溃。
 
 #### 应停止或大幅修改项目的结果
 
-- 合理 pooling 后，少于 10% segments 有 non-vacuous intervals；
-- equal-mass permuted-credit mask 与 CPCD 持平；
-- flat-history estimation 在 long-delay examples 上与 provenance 持平；
-- equal supervised-token 或 equal-FLOP controls 下收益消失；
-- credit precision 在 $\Gamma=1.25$ 下崩溃；
-- Agentic-DPO 或 explicit tool-error masking 在所有 domains 上与 CPCD 持平；
-- 改进只在 labels 泄漏 future/reference information 时出现；
-- 超过 50 turns 的 trajectories 中没有收益。
+- 合理合并样本后，仍有少于 10% 的片段能够得到非完全不确定区间；
+- 保持总权重不变的随机信用遮蔽与 CPCD 表现相同；
+- 在长延迟样本上，普通平铺历史估计与来源链方法表现相同；
+- 在监督词元数或浮点计算量相同的条件下，性能收益消失；
+- 信用精确率在 $\Gamma=1.25$ 时就崩溃；
+- Agentic-DPO 或显式工具错误遮蔽在所有领域都与 CPCD 持平；
+- 只有允许标签看到未来信息或参考答案时才有改进；
+- 在超过 50 轮的轨迹中没有收益。
 
-这些标准能让工作即使失败也有信息量：结果会说明 fixed logs 是否包含足够 overlap，从而支持 long-horizon signed credit。
+即使项目失败，这些标准也能产生有意义的结论：它们会说明现有冻结日志是否包含足够多的可比较替代动作，从而支持长时程的正负信用归因。
 
 ---
 
-## 5. 推荐研究形态
+## 5. 推荐的论文形态
 
-### 5.1 Primary paper claim
+### 5.1 论文的核心主张
 
-一个 defensible claim 是：
+比较稳妥、能够由实验支持的核心主张是：
 
-> Long-horizon offline agent credit 应被视为 conservative sign identification，而不是 dense score prediction。Provenance-defined semantic segments 与 support-aware intervals 可以把 frozen logs 选择性编译为 SFT 和 preference targets，同时提升 intervention-level credit precision 与 downstream policy learning。
+> 长时程离线智能体的信用归因，不应被当成对每一步生成稠密而精确的分数，而应被当成对信用正负方向的保守识别。利用证据来源链定义语义片段，再结合考虑样本支持度的信用区间，可以把冻结轨迹选择性地转换成 SFT 和偏好训练目标，并提高干预层面的信用准确率以及训练后策略的任务表现。
 
-避免更强的说法，即 CPCD 恢复了每一步的真实 causal contribution。
+应避免声称 CPCD 已经恢复了每一步的真实因果贡献。只有在可比较样本、状态表示和隐藏因素假设成立时，信用区间才具有因果解释；其他情况下，它只是带敏感性边界的观察性效用估计。
 
-### 5.2 Minimum publishable contribution
+### 5.2 最小可发表贡献
 
-最小 coherent paper 包含三部分：
+一篇最小而完整的论文应包含三部分：
 
-1. 一个带 intervention-derived credit signs 和 risk-coverage metrics 的 benchmark protocol；
-2. CPCD-Lite，包含 overlap-aware interval abstention 与 context/target separation；
-3. controlled evidence，证明带来 policy gain 的是 credit signal，而不是 token reduction。
+1. 一套带有中间状态干预信用标签、风险—覆盖率指标的评测协议；
+2. CPCD-Lite：包含样本重叠检查、区间式拒绝判断，以及“上下文保留、目标遮蔽”机制；
+3. 受控实验证据，证明提升来自信用信号本身，而不是简单减少监督词元或改变每个任务的梯度总量。
 
-Learned semantic graph、memory operations、SWE scaling 和 negative DPO 应在这个核心通过 falsification 后再加入。
+学习得到的语义图、完整记忆操作、SWE 扩展和负向 DPO，都应在核心假设通过证伪实验之后再加入。
 
-### 5.3 主要 novelty risks
+### 5.3 主要创新风险
 
-- **P2T overlap:** process graphs 与 grounded segment selection 已经通过 privileged SWE patches 展示过。区别必须是 fixed-log observational variation、signed intervals 与 abstention。
-- **Agentic-DPO overlap:** state-conditioned offline preference learning 已经是强 baseline。区别必须来自 failures、delayed provenance 与 supported negative/ambiguous cases。
-- **ATLaS overlap:** 仅把 selector prompt 换成 score model 不够。必须做直接 intervention calibration。
-- **DML-IL overlap:** 通用 doubly robust 或 instrumental-variable imitation learning 不是新的。贡献必须是 long-horizon semantic treatment definition、compiler 与 empirical causal-credit benchmark。
-- **快速变化的 2026 文献:** 在声称 novelty 或投稿前，必须重新做 primary-source 与 OpenReview 搜索。
+- **与 P2T 的重叠**：P2T 已经利用标准补丁构造过程图并选择有事实依据的片段。CPCD 的区别必须落在冻结日志中的结果差异、带正负符号的信用区间和拒绝判断上。
+- **与 Agentic-DPO 的重叠**：状态条件的离线偏好学习已经是强基线。CPCD 必须证明失败轨迹、延迟来源链，以及可靠负向与不确定片段的处理带来额外价值。
+- **与 ATLaS 的重叠**：只把关键步骤选择器换成另一个打分模型并不构成足够创新。必须直接用中间状态干预校准信用。
+- **与 DML-IL 的重叠**：通用双重稳健估计或工具变量模仿学习并不是新方法。贡献应是适用于长时程智能体的语义动作定义、训练数据编译流程和因果信用评测基准。
+- **2026 年文献变化很快**：正式声称创新性或投稿前，必须重新检索原始论文和 OpenReview。
 
-### 5.4 Implementation order
+### 5.4 推荐实现顺序
 
-1. 冻结一个 multi-policy ALFWorld/WebShop log set，并定义 restorable branch points。
-2. 实现 deterministic segmentation、support cells 与 branch-effect evaluation。
-3. 在构建 semantic graph model 前，先跑 full SFT、random mask、ATLaS-style mask 与 CPCD-Lite。
-4. 加入 failure traces，测试 positive credit 能否恢复有用 prefixes。
-5. 只有 intervention precision 校准后，再迁移到 tau-bench。
-6. 加入 provenance 与 long-delay buckets。
-7. 最后加入 SWE 与 observed-pair DPO。
+1. 冻结一份由多个策略生成的 ALFWorld/WebShop 日志，并定义可恢复的中间分支点。
+2. 实现确定性轨迹切分、可比较状态组和分支效果评估。
+3. 在训练语义图模型前，先完成完整 SFT、随机遮蔽、ATLaS 风格遮蔽和 CPCD-Lite。
+4. 加入失败轨迹，检验能否恢复其中有用的前缀和诊断步骤。
+5. 只有信用符号在干预评估中校准良好后，才迁移到 tau-bench。
+6. 加入来源链和长延迟分组分析。
+7. 最后扩展到 SWE，并加入有真实对照的 DPO。
 
 ---
 
 ## 6. 文献检索说明
 
-本次 focused search 使用了 `offline trajectory`、`selective SFT`、`critical step`、`expert failure`、`hindsight relabeling`、`state-conditioned preference`、`privileged process supervision` 与 `long-horizon agent` 等组合，覆盖 2024-2026 年。检索源包括 arXiv、OpenAlex 与 Semantic Scholar，并随后用 primary arXiv page 做验证。统一搜索过程中多次遇到 rate limit，且本环境无法穷尽查询 OpenReview，因此本文是 focused research review，而不是 formal systematic review。各论文报告的数值收益不应当作 leaderboard 横向比较。
+本次定向检索组合使用了“离线轨迹”“选择性 SFT”“关键步骤”“专家失败”“事后重标注”“状态条件偏好”“特权过程监督”和“长时程智能体”等中英文关键词，覆盖 2024—2026 年。检索源包括 arXiv、OpenAlex 和 Semantic Scholar，并进一步回到 arXiv 原始页面核验论文信息。检索期间多次遇到接口限流，而且当前环境无法穷尽查询 OpenReview，因此本文是一份面向具体研究问题的定向调研，不是严格意义上的系统综述。不同论文的模型、数据和计算预算不同，论文内报告的数值收益不能直接横向排名。
 
 ### 建议阅读顺序
 
-1. [ATLaS](https://arxiv.org/abs/2503.02197)：最清晰的 selective-SFT formulation。
-2. [STeP](https://arxiv.org/abs/2505.20023) 与 [EEF](https://arxiv.org/abs/2504.13145)：context/target separation 与 useful failure fragments。
-3. [Q-SFT](https://arxiv.org/abs/2411.05193) 与 [AWR](https://arxiv.org/abs/1910.00177)：value-weighted likelihood foundations。
-4. [HPL](https://arxiv.org/abs/2510.03253) 与 [Agentic-DPO](https://arxiv.org/abs/2607.10601)：group 与 state 粒度的 offline preference learning。
-5. [SWE-Lego](https://arxiv.org/abs/2601.01426) 与 [P2T](https://arxiv.org/abs/2605.21996)：真实 long-horizon SWE SFT 与 privileged process curation。
-6. [HSL](https://arxiv.org/abs/2607.04235) 与 [AgentHER](https://arxiv.org/abs/2603.21357)：对 unintended 或 failed outcomes 的 hindsight use。
-7. [DML-IL](https://arxiv.org/abs/2502.07656)：causal-identification warning 与理论基础。
-8. [IPR](https://arxiv.org/abs/2406.11176) 与 [CSO](https://arxiv.org/abs/2602.03412)：intervention-based upper bounds 与 evaluation design。
-9. [ECHO](https://arxiv.org/abs/2606.31650)：long-delay memory provenance 与 credit routing。
+1. [ATLaS](https://arxiv.org/abs/2503.02197)：选择性 SFT 最清晰的基本形式。
+2. [STeP](https://arxiv.org/abs/2505.20023) 与 [EEF](https://arxiv.org/abs/2504.13145)：理解“保留上下文但遮蔽目标”，以及怎样利用失败轨迹中的有用片段。
+3. [Q-SFT](https://arxiv.org/abs/2411.05193) 与 [AWR](https://arxiv.org/abs/1910.00177)：理解按价值或优势加权最大似然训练的基础。
+4. [HPL](https://arxiv.org/abs/2510.03253) 与 [Agentic-DPO](https://arxiv.org/abs/2607.10601)：理解动作组和状态粒度的离线偏好学习。
+5. [SWE-Lego](https://arxiv.org/abs/2601.01426) 与 [P2T](https://arxiv.org/abs/2605.21996)：理解真实长时程软件工程 SFT 和使用特权过程信息的数据筛选。
+6. [HSL](https://arxiv.org/abs/2607.04235) 与 [AgentHER](https://arxiv.org/abs/2603.21357)：理解怎样事后利用意外达成的目标和失败结果。
+7. [DML-IL](https://arxiv.org/abs/2502.07656)：理解因果可识别性风险和相关理论基础。
+8. [IPR](https://arxiv.org/abs/2406.11176) 与 [CSO](https://arxiv.org/abs/2602.03412)：理解基于中间状态干预的性能上界和评估设计。
+9. [ECHO](https://arxiv.org/abs/2606.31650)：理解长延迟记忆来源链与信用路由。
